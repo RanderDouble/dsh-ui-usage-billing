@@ -8,6 +8,14 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.4.28（2026-10-13）
+
+- 修复：**workbuddy adapter 通道费用恒为 0**（issue #90，感谢 @JinruiWang）——`dsh-workbuddy-connect` 经 `llm.registerAdapter` 注册 provider、不进 llm-pi-ai 路由表，`siteRefOf()` 查询 miss 后落 unknown 桶（#82 口径强制记 0）。现增已知第三方 adapter 通道名单（`workbuddy` / `workbuddy-ai`，大小写不敏感），命中即归位 `direct:<provider>` 按官方目录价计价；名单不接入官方口径（`officialCalls`/`officialCost` 保持 0），名单外配置外 provider 仍落 unknown 记 0；客户端 `direct:workbuddy` 渲染为「直连 · WorkBuddy」
+- 修复：**折叠早于实时价目表注入导致「明细 ≈¥38 vs 总额 ¥7」双口径**（issue #90）——预热折叠时价目表未就绪的模型 cost 记 0 落 `unpricedModels`，显示层就绪后按目录价算预估。现复用判定加惰性失效第三键（`unpricedModels ∩ 现价目表` 即重折）：账本门 + cache 命中门（P1，stable-stamp 复现测试覆盖）+ 增量游标门三处配套，只重折受影响行、非全量重折；价目表代际按 extraModels key 集合比较（P3），无变化时跳过聚合
+- 账本：**FOLD_VERSION 20 → 21**——问题 1 是归账语义变更，存量 unknown 行升级后重折补齐历史费用；问题 2 走惰性失效不 bump（价目表时序问题，bump 会造成全量重折性能回退）
+- 测试：577 全绿（基线 555），含 workbuddy 计价 5 用例、惰性失效 3 用例、未安装插件的负向隔离组、provider 展示层新建 spec 8 断言、端到端 reprice 验证 spec；真机（宿主 0.2.0-rc.2）三口径逐字节一致
+- 构建：lib/client.js 252,657 字节 ≤ 256 KiB（262,144 字节）单文件上限，余量 9,487 字节
+
 ### v1.4.27（2026-10-12）
 
 - 新增：**中转站绘图通道模型计费补录**（issue #88，感谢 @yuxu4468-hash）——`gpt-image-2` / `gpt-image-2.5-sunburst` 进内置目录（实付人民币单价 ¥14 / ¥5.6 / ¥84 per 1M，两型号同价；models.dev 无同 id 收录故按实付价入目录）+ 点/横杠变体别名；此前落「未收录」、经 DSH 调用费用记 0
