@@ -34,6 +34,27 @@ export declare const DEFAULT_SUBSCRIPTION_PROVIDERS: readonly string[];
  * 调用与费用分桶展示；部署可由配置覆盖（见 {@link AggregateOptions}）。
  */
 export declare function isOfficialProvider(provider: string): boolean;
+/**
+ * 已知的「第三方插件注册 adapter」通道名单：这些 provider 由别的插件经
+ * `ctx.llm.registerAdapter` 注册，**不经 llm-pi-ai 路由表**，因此
+ * {@link siteRefOf} 的路由查询必然 miss。与订阅豁免（issue #37 的 grok
+ * build）同构：显式列出、不做「猜通道」的通用发现——猜错会把来源不明的
+ * 路由也归位成可计价通道，违背 issue #82「支出主体无法核实不计价」的初衷。
+ *
+ * 收录语义：这些通道的支出主体是可核实的（WorkBuddy = 腾讯 WorkBuddy
+ * 桌面 App 账号），计费用模型官方目录价折算 Token 成本，与积分制解耦。
+ * 它们**不是** DeepSeek 官方渠道——{@link isOfficialProvider} 与
+ * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
+ */
+export declare const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string>;
+/**
+ * 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+ * 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+ *（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+ * 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+ *（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+ */
+export declare function isKnownAdapterProvider(provider: string): boolean;
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 export declare const OFFICIAL_DEEPSEEK_ORIGIN = "https://api.deepseek.com";
 /**
@@ -78,8 +99,10 @@ export declare function siteOriginOf(baseURL: string): string;
  *   网关）按 `direct` 归位——unknown 一刀切会把官方直连的费用堆进「未知路由」组、
  *   且不算官方渠道（回归修复）；订阅豁免命中的通道（显式 `subscriptionProviders`
  *   配置或判定函数）同样按 `direct` 归位——订阅管理类插件注册的通道不经路由表，
- *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；其余配置外
- *   名称保留 unknown（无法核实通道）。
+ *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；已知的第三方
+ *   插件注册 adapter 通道（{@link KNOWN_ADAPTER_PROVIDERS}，如 workbuddy）同样按
+ *   `direct` 归位——支出主体可核实、按模型官方目录价计 Token 成本，unknown 桶会让
+ *   费用恒为 0；其余配置外名称保留 unknown（无法核实通道）。
  * @param provider - 会话日志里的 provider 路由名（request/header 的 `config.provider`）。
  * @param routes - 当前 provider 路由视图（来自 llm-pi-ai providers）。
  * @param opts - `subscription`：该调用是否已被订阅豁免判定命中。
@@ -568,7 +591,7 @@ export interface UsageLedgerDocument {
  * 会话费用只剩最近一段，issue #29）。
  * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
  */
-export declare const FOLD_VERSION = 20;
+export declare const FOLD_VERSION = 21;
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
  * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并

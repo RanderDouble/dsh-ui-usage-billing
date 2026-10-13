@@ -64,6 +64,36 @@ export function isOfficialProvider(provider: string): boolean {
   return /^deepseek(?:-[a-z0-9-]+)?$/i.test(provider.trim())
 }
 
+/**
+ * 已知的「第三方插件注册 adapter」通道名单：这些 provider 由别的插件经
+ * `ctx.llm.registerAdapter` 注册，**不经 llm-pi-ai 路由表**，因此
+ * {@link siteRefOf} 的路由查询必然 miss。与订阅豁免（issue #37 的 grok
+ * build）同构：显式列出、不做「猜通道」的通用发现——猜错会把来源不明的
+ * 路由也归位成可计价通道，违背 issue #82「支出主体无法核实不计价」的初衷。
+ *
+ * 收录语义：这些通道的支出主体是可核实的（WorkBuddy = 腾讯 WorkBuddy
+ * 桌面 App 账号），计费用模型官方目录价折算 Token 成本，与积分制解耦。
+ * 它们**不是** DeepSeek 官方渠道——{@link isOfficialProvider} 与
+ * {@link officialChannelOf} 都不会因本名单把调用算进官方口径。
+ */
+export const KNOWN_ADAPTER_PROVIDERS: ReadonlySet<string> = new Set([
+  // dsh-workbuddy-connect（corrinehu）：国内版 provider id。
+  'workbuddy',
+  // dsh-workbuddy-connect：国际版（WorkBuddy AI）provider id。
+  'workbuddy-ai',
+])
+
+/**
+ * 一个 provider 是否命中已知 adapter 通道名单。判定与 {@link isOfficialProvider}
+ * 同姿态：trim + 大小写不敏感——dsh-workbuddy-connect 注册的是小写 id
+ *（`workbuddy` / `workbuddy-ai`），宿主不强制 route 小写，按大小写归一化可避免
+ * 日志里出现大小写变体时静默落回 unknown 桶。路由表命中仍优先于本名单
+ *（见 {@link siteRefOf}），用户自配的大小写变体走配置路径。
+ */
+export function isKnownAdapterProvider(provider: string): boolean {
+  return KNOWN_ADAPTER_PROVIDERS.has(provider.trim().toLowerCase())
+}
+
 /** DeepSeek 官方直连端点的归一化 origin（`siteOriginOf` 口径）：有 baseURL 的路由只有它算官方。 */
 export const OFFICIAL_DEEPSEEK_ORIGIN = 'https://api.deepseek.com'
 
@@ -134,8 +164,10 @@ export function siteOriginOf(baseURL: string): string {
  *   网关）按 `direct` 归位——unknown 一刀切会把官方直连的费用堆进「未知路由」组、
  *   且不算官方渠道（回归修复）；订阅豁免命中的通道（显式 `subscriptionProviders`
  *   配置或判定函数）同样按 `direct` 归位——订阅管理类插件注册的通道不经路由表，
- *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；其余配置外
- *   名称保留 unknown（无法核实通道）。
+ *   unknown 桶既掩盖归属又按 token 误计费（issue #37 的 grok build）；已知的第三方
+ *   插件注册 adapter 通道（{@link KNOWN_ADAPTER_PROVIDERS}，如 workbuddy）同样按
+ *   `direct` 归位——支出主体可核实、按模型官方目录价计 Token 成本，unknown 桶会让
+ *   费用恒为 0；其余配置外名称保留 unknown（无法核实通道）。
  * @param provider - 会话日志里的 provider 路由名（request/header 的 `config.provider`）。
  * @param routes - 当前 provider 路由视图（来自 llm-pi-ai providers）。
  * @param opts - `subscription`：该调用是否已被订阅豁免判定命中。
@@ -152,6 +184,7 @@ export function siteRefOf(
   }
   if (isOfficialProvider(provider)) return { kind: 'direct', provider }
   if (opts.subscription === true) return { kind: 'direct', provider }
+  if (isKnownAdapterProvider(provider)) return { kind: 'direct', provider }
   return { kind: 'unknown', provider }
 }
 
@@ -929,7 +962,13 @@ export interface UsageLedgerDocument {
 // 目录条目（issue #88，中转站绘图通道的实付人民币单价）。与 19 同因：fingerprint
 // 不含目录，复用旧行会让已按「未收录」记 0 的用量在升级后继续为 0；bump 让日志
 // 仍在的会话按目录价重折。
-export const FOLD_VERSION = 20
+// 21：计价语义变更——已知的第三方插件注册 adapter 通道（KNOWN_ADAPTER_PROVIDERS，
+// 如 dsh-workbuddy-connect 的 workbuddy / workbuddy-ai）从 unknown 桶归位
+// direct:<provider> 并按模型官方目录价计价。旧口径下这些调用（issue #82 的
+// unknown 记 0）费用恒为 0、token 照常统计，复用旧行会让已发生的用量在升级后
+// 仍为 0；bump 让日志仍在的会话重折出费用，仅日志已删的行留在旧口径（账本
+// 「历史定格」语义的固有残留）。
+export const FOLD_VERSION = 21
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
@@ -1758,6 +1797,17 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   // 全量重折的分片大小：每片折叠后让出事件循环，超大会话不再连续阻塞宿主 RPC（issue #30）。
   const FOLD_CHUNK_EVENTS = 8000
 
+  /** 惰性失效（价目表时序）：账本/缓存行若以「当时不可计价」的模型落盘，
+   *  而价目表现在能计价了，该行必须重折——否则显示层按实时价算出的
+   *  「目录价预估」与服务端 cost=0 并存，出现「明细比总额高」的双口径
+   *  （真机复现：预热折叠早于 models.dev 价目表注入，step-5-preview
+   *  折叠时刻 cost=0、渲染时刻 ≈¥38）。复用判定据此刻检查：不走配置指纹
+   *  （价目表不进指纹，否则 6h 一次的价格刷新会让全部历史行全量重折），
+   *  也不 bump FOLD_VERSION（那是归账语义版本，价目表时序不是语义变更）。
+   *  价目表变化后未受影响行（无 unpriced 模型）依旧零读取复用。 */
+  const foldNeedsReprice = (fold: SerializedSessionFold): boolean =>
+    fold.unpricedModels.some(key => isPriced(key))
+
   /** 把一份（全量或增量）折叠结果登记进 durable ledger；内容无变化时不落盘。 */
   const recordLedger = (id: string, cwd: string | undefined, stamp: string | null, fold: SessionFold): void => {
     if (options.ledger === undefined) return
@@ -1772,12 +1822,15 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
     const row = ledger.get(id)
     // A no-locate backend has no stable stamp, so compare the serialized row;
     // located logs use the cheap stamp and metadata check.
+    // 例外：行内 unpricedModels 模型若已被当前价目表收录（惰性失效触发的重折），
+    // 必须重写——fold 的 cost/unpricedModels 变了，但元数据键全同，不比内容会发现不了。
     const changed = row === undefined
       || row.stamp !== entry.stamp
       || row.cwd !== entry.cwd
       || row.foldVersion !== entry.foldVersion
       || row.fingerprint !== entry.fingerprint
       || (stamp === null && JSON.stringify(row.fold) !== JSON.stringify(entry.fold))
+      || (stamp !== null && foldNeedsReprice(row.fold))
     if (changed) {
       ledger.set(id, entry)
       ledgerNeedsSave = true
@@ -1889,38 +1942,45 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           if (!ledger.has(id)) noLedgerUnreadable += 1
           continue
         }
-        const hit = cache.get(id)
-        if (hit !== undefined && stamp !== null && hit.stamp === stamp) {
-          // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
-          cache.delete(id)
-          cache.set(id, hit)
-          folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), fold: hit.fold })
-          included.add(id)
-          continue
-        }
         // 单个损坏/不可读的会话日志（如 zstd torn frame）不能拖垮整份聚合：
         // 跳到下一个会话，避免面板整体归零。失败会话放进 skipped 末尾告警。
         try {
           const cwd = meta.cwd
           // 重启首折快路径：账本行的失效键与当前日志完全一致（同算法版本）时
           // 零读取复用——几十个历史会话的重启不再各自全量解压一遍。
+          // 放在 cache 命中之前：惰性失效（价目表就绪）须让账本行优先拦截，否则
+          // 命中缓存的旧折叠（同 stamp 零读取）会吞掉重折。账本命中行不进 LRU，
+          // 也不写 cache（stamp 未动，每轮直接命中账本快路径）。
           const ledgerRow = ledger.get(id)
-          // 复用双键：日志 stamp 未动 **且** 聚合配置指纹一致——用户改配置
-          //（订阅豁免/路由别名/官方名单/搜索估值）后历史行立即失效重折（issue #37）。
           if (ledgerRow !== undefined && ledgerRow.stamp !== undefined && stamp !== null
             && ledgerRow.stamp === stamp && (ledgerRow.foldVersion ?? 1) === FOLD_VERSION
-            && ledgerRow.fingerprint === foldFingerprint) {
+            && ledgerRow.fingerprint === foldFingerprint
+            && !foldNeedsReprice(ledgerRow.fold)) {
             const fold = deserializeFold(ledgerRow.fold)
-            // 账本命中行不进 LRU：会话数超过上限时，它们每轮都会把活跃会话的
-            // 增量状态机（machine/lastSeq）挤出缓存，使活跃会话退化为每轮全量
-            // 重折（issue #30 的增量修复被抵消）。账本行本身就在 ledger map 里，
-            // 下轮反序列化即可复用，无需占用缓存名额。
             folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold })
             included.add(id)
             continue
           }
+          const hit = cache.get(id)
+          // 惰性失效同样作用于 cache 命中路径：预热折叠（价目表未就绪）会同时写入
+          // cache 行与账本行——账本门触发落穿后，若无这道门就会零读取复用旧折叠，
+          // 空闲会话 stamp 永不变 → 整个进程生命周期 cost=0，只有重启才自愈。
+          // cache 里是内存版 fold（unpricedModels 是 Set，没有 .some）。
+          if (hit !== undefined && stamp !== null && hit.stamp === stamp
+            && ![...hit.fold.unpricedModels].some(key => isPriced(key))) {
+            // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
+            cache.delete(id)
+            cache.set(id, hit)
+            folds.push({ id, ...(meta.cwd === undefined ? {} : { cwd: meta.cwd }), fold: hit.fold })
+            included.add(id)
+            continue
+          }
           const previous = cache.get(id)
-          if (previous?.machine !== undefined && previous.lastSeq !== undefined) {
+          // 惰性失效同样作用于增量游标：价目表就绪后，此前因模型未收录而
+          // cost=0 的缓存行不能继续增量追加（旧事件永远补不出 cost）——
+          // 丢弃缓存退回全量重折，整条日志按当前价目表计价。
+          if (previous?.machine !== undefined && previous.lastSeq !== undefined
+            && ![...previous.fold.unpricedModels].some(key => isPriced(key))) {
             // seq 增量折叠（issue #30）：活跃会话持续追加使 mtime+size 键每轮失效，
             // 全量重读会让宿主事件循环连续阻塞十几秒、session/list 全部挂起。
             // 只读取上次折叠之后的新增段，折进既有 fold（状态机跨批次延续）。

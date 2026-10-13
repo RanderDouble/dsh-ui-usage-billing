@@ -1,4 +1,4 @@
-import { applyBuiltinCatalog } from '../src/client/pricing.ts'
+import { applyBuiltinCatalog, applyLivePricing } from '../src/client/pricing.ts'
 import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
 
 // 测试套件承担宿主注入角色：目录与别名表在模块加载时全量注入（宿主 activate
@@ -170,6 +170,156 @@ describe('byDayModelsSite (issue #16)', () => {
 
     const notExempted = foldSession(events, new Set())
     expect(notExempted.byDayModelsSite.get(day)?.get('grok')?.get('unknown')?.calls).toBe(1)
+  })
+})
+
+describe('known adapter providers (workbuddy)', () => {
+  it('homes workbuddy calls to direct and prices them by catalog rate', () => {
+    // dsh-workbuddy-connect 经 ctx.llm.registerAdapter 注册 provider，不经
+    // llm-pi-ai 路由表：旧口径落 unknown 桶且费用记 0（issue #82），归位后按
+    // 模型官方目录价计 Token 成本。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    const day = dayStamp(2_000)
+
+    // 归位 direct:<provider> 桶，不再是 unknown。
+    expect(fold.bySite.has('unknown')).toBe(false)
+    const direct = fold.bySite.get('direct:workbuddy')
+    expect(direct?.calls).toBe(1)
+    // 三维格同样归位（provider 视图的模型行按此取数）。
+    expect(fold.byDayModelsSite.get(day)?.get('flash')?.get('direct:workbuddy')?.calls).toBe(1)
+    // 计价：目录内模型按目录价算出金额（token 口径与 foldUsage 单测同源）。
+    expect(fold.total.cost).toBeGreaterThan(0)
+    expect(direct?.cost).toBeGreaterThan(0)
+    // 不是订阅通道，token 照常统计。
+    expect(fold.total.calls).toBe(1)
+    expect(fold.total.input).toBe(920)
+  })
+
+  it('homes the international workbuddy-ai variant the same way', () => {
+    const events: SessionEvent[] = [header(1, 'glm-5.3-flash', 'workbuddy-ai'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('direct:workbuddy-ai')).toBe(true)
+    expect(fold.bySite.has('unknown')).toBe(false)
+    expect(fold.total.cost).toBeGreaterThan(0)
+  })
+
+  it('homes case variants of the adapter route to direct (nit from PR #90 review)', () => {
+    // 宿主不强制 route 小写；名单判定与 isOfficialProvider 同姿态（trim + 大小写
+    // 不敏感），避免日志里出现大小写变体时静默落回 unknown 桶。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'WorkBuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('unknown')).toBe(false)
+    expect(fold.bySite.get('direct:WorkBuddy')?.calls).toBe(1)
+    expect(fold.total.cost).toBeGreaterThan(0)
+    // 仍不算官方渠道。
+    expect(fold.total.officialCalls).toBe(0)
+  })
+
+  it('never counts workbuddy calls as the official DeepSeek channel', () => {
+    // workbuddy 是腾讯 WorkBuddy 桌面 App 的账号通道，不是 DeepSeek 官方直连：
+    // 归位 direct 不得顺带把调用算进官方口径（officialCalls/officialCost 必须为 0），
+    // 否则「官方 vs 三方」分桶与 DeepSeek 官方组会虚增。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.total.officialCalls).toBe(0)
+    expect(fold.total.officialCost).toBe(0)
+    const direct = fold.bySite.get('direct:workbuddy')
+    expect(direct?.officialCalls).toBe(0)
+    expect(direct?.officialCost).toBe(0)
+  })
+
+  it('leaves unlisted providers outside the route table in the unknown bucket', () => {
+    // 反证：名单外的配置外 provider 仍按 issue #82 口径落 unknown、记 0 费用。
+    // 这条断言同时守住「不猜通道」的边界——加名单是显式行为，不是前缀/模式匹配。
+    const events: SessionEvent[] = [header(1, 'deepseek-v4.1-flash', 'some-other-plugin'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('unknown')).toBe(true)
+    expect(fold.total.cost).toBe(0)
+  })
+
+  it('keeps unknown-channel models uncatalogued out of the priced path', () => {
+    // 归位只解决通道归属，不解决目录缺口：目录外模型仍记 0 并进 unpricedModels，
+    // 面板据此提示「未收录」而不是伪造金额。
+    const events: SessionEvent[] = [header(1, 'not-a-real-model-id', 'workbuddy'), message(2, 2_000, USAGE)]
+    const fold = foldSession(events, new Set())
+    expect(fold.bySite.has('direct:workbuddy')).toBe(true)
+    expect(fold.total.cost).toBe(0)
+
+    expect([...fold.unpricedModels]).toContain('not-a-real-model-id')
+  })
+})
+
+describe('no workbuddy installed (known-adapter isolation)', () => {
+  /**
+   * 负向隔离（g-001/g-002 的正确性边界）：KNOWN_ADAPTER_PROVIDERS 是显式名单，
+   * 只在会话日志出现 workbuddy/workbuddy-ai 调用时才参与判定。未安装
+   * dsh-workly-connect 的部署不产生这类事件，计费结果必须与名单引入前逐字段一致。
+   * 本组用例证明这一点：同一套「不含 workbuddy 通道」的事件流，四种通道形态的
+   * 归位、计价、官方口径全部走原有路径；平行对照组再证明测试本身有区分度。
+   */
+
+  /** 一套覆盖四种通道形态的事件流，provider 名经参数注入（平行对照组用）。 */
+  function mixedChannelEvents(provider: string): SessionEvent[] {
+    return [
+      // 形态 1：deepseek 前缀官方直连（不经路由表）→ direct + 官方口径 + 目录价。
+      header(1, 'deepseek-v4.1-flash', 'deepseek-official'), message(2, 1_000, USAGE),
+      // 形态 2：路由表命中带 baseURL → site 桶（按 origin 归组）。
+      header(3, 'glm-5.3-flash', provider === 'workbuddy' ? 'workbuddy' : provider), message(4, 2_000, USAGE),
+      // 形态 3：订阅豁免通道 → direct + 记 0 + plan 标记。
+      header(5, 'kimi-k3', 'kimi-coding'), message(6, 3_000, USAGE),
+      // 形态 4：名单外配置外 provider → unknown 桶记 0（issue #82）。
+      header(7, 'flash', 'some-other-plugin'), message(8, 4_000, USAGE),
+    ]
+  }
+
+  /** 断言一套 fold 与预期语义逐字段一致（四种形态各验关键不变量）。 */
+  function expectBaselineSemantics(fold: SessionFold, siteProvider: string): void {
+    // 形态 1：官方直连不变——official 计数与费用来自 deepseek 前缀，与名单无关。
+    expect(fold.total.officialCalls).toBe(1)
+    expect(fold.total.officialCost).toBeGreaterThan(0)
+    expect(fold.bySite.get('direct:deepseek-official')?.officialCalls).toBe(1)
+    // 形态 2：site 桶按 origin 归组（路由表优先于名单——名单不抢配置路径）。
+    expect(fold.bySite.has(`site:https://relay.example.com`)).toBe(true)
+    // 形态 3：订阅豁免记 0（kimi-k3 有目录价但走 kimi-coding 订阅通道）。
+    expect(fold.bySite.get('direct:kimi-coding')?.cost).toBe(0)
+    expect(fold.bySite.get('direct:kimi-coding')?.calls).toBe(1)
+    // 形态 4：名单外配置外 provider 仍 unknown 记 0（issue #82 语义不动）。
+    expect(fold.bySite.get('unknown')?.calls).toBe(1)
+    expect(fold.bySite.get('unknown')?.cost).toBe(0)
+    // 名单绝不给非 workbuddy 通道发 direct 归位。
+    expect(fold.bySite.has(`direct:${siteProvider}`)).toBe(siteProvider.startsWith('workbuddy'))
+  }
+
+  it('prices a mixed-channel log identically with or without the known-adapter list', () => {
+    // 路由视图：一条带 baseURL 的中转路由（形态 2 的 site 桶来源）。
+    const routes = { 'my-relay': { baseURL: 'https://relay.example.com/v1' } }
+    // 对照组 A：provider 名为普通中转名（未安装 workbuddy 时日志里的形态）。
+    const foldA = foldSession(mixedChannelEvents('my-relay'), new Set(['kimi-coding']), undefined, routes)
+    expectBaselineSemantics(foldA, 'my-relay')
+    const sumA = [...foldA.bySite.values()].reduce((sum, cell) => sum + cell.cost, 0)
+    // total 与 bySite 之和一致（无双口径）。
+    expect(foldA.total.cost).toBeCloseTo(sumA, 6)
+
+    // 对照组 B：同样的结构、provider 名换成另一个非 workbuddy 名——结果同构
+    //（桶键跟随 provider 名变化，其余语义逐字段一致）。KNOWN_ADAPTER_PROVIDERS
+    // 存在与否不改变这两组中的任何字段。
+    const foldB = foldSession(mixedChannelEvents('other-relay'), new Set(['kimi-coding']), undefined, { 'other-relay': { baseURL: 'https://relay.example.com/v1' } })
+    expectBaselineSemantics(foldB, 'other-relay')
+    expect(foldB.total.cost).toBeCloseTo(foldA.total.cost, 6)
+    expect(foldB.total.calls).toBe(foldA.total.calls)
+    expect(foldB.total.officialCalls).toBe(foldA.total.officialCalls)
+    expect(foldB.total.officialCost).toBeCloseTo(foldA.total.officialCost, 6)
+  })
+
+  it('differs only when the provider id itself is on the known-adapter list', () => {
+    // 平行对照：同名事件流，唯一变量是 provider 是否叫 workbuddy——
+    // 证明上一条测试的「零改变」断言不是恒真，名单确实只在命中时生效。
+    const routes = { 'workbuddy': { baseURL: 'https://relay.example.com/v1' } }
+    const fold = foldSession(mixedChannelEvents('workbuddy'), new Set(['kimi-coding']), undefined, routes)
+    // 路由表命中（形态 2）优先于名单：site 桶仍按 origin 归组，名单不抢配置路径。
+    expect(fold.bySite.has('site:https://relay.example.com')).toBe(true)
+    expect(fold.bySite.has('direct:workbuddy')).toBe(false)
   })
 })
 
@@ -1738,6 +1888,199 @@ describe('unreadable sessions visibility', () => {
 
     // exactOptionalPropertyTypes：无拒读时不带 key，UI 判空逻辑不必区分 0 与缺省。
     expect(Object.hasOwn(stats, 'unreadableSessions')).toBe(false)
+  })
+})
+
+describe('lazy reprice after live catalog arrives (fold-version preserved)', () => {
+  /** 真实日志形态：step-5-preview 在预热折叠时刻未收录（cost=0、落 unpricedModels）。 */
+  function step5Events(): SessionEvent[] {
+    return [header(1, 'step-5-preview'), message(2, Date.UTC(2026, 9, 12, 4, 0, 0), USAGE)]
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+    applyLivePricing({ source: 'builtin' })
+  })
+
+  it('refolds a cached fold whose unpriced model becomes priced', async () => {
+    vi.useFakeTimers()
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      const reads: number[] = []
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads.push(fromSeq)
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      // 折叠时刻价目表不含 step-5-preview：cost=0、落 unpricedModels。
+      const before = await aggregator.aggregate()
+      expect(before.byModel['step-5-preview']?.cost ?? 0).toBe(0)
+      expect(before.unpricedModels).toContain('step-5-preview')
+
+      // 价目表注入（models.dev extraModels）后重折：step-5-preview 折出 cost，
+      // total.cost 与 byModel 之和一致（无双口径）。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      const cellAfter = after.byModel['step-5-preview']
+      expect(cellAfter?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-5-preview')
+      const byModelSum = Object.values(after.byModel).reduce((sum, row) => sum + row.cost, 0)
+      expect(after.total.cost).toBeCloseTo(byModelSum, 6)
+      // 关键：旧折叠（cache 命中，同 stamp 零读取）没有吞掉重折——
+      // 日志被重新读取（全量 from=0），cost 由此折出。
+      expect(reads).toContain(0)
+      expect(reads.length).toBeGreaterThanOrEqual(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('invalidates the incremental cursor when the cached fold has since-priced unpriced models', async () => {
+    vi.useFakeTimers()
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      const reads: string[] = []
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads.push(`from=${String(fromSeq)}`)
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+      await aggregator.aggregate()
+      expect(reads).toEqual(['from=0'])
+
+      // 追加事件 + 价目表就绪：惰性失效须丢弃增量游标退回全量重折，
+      // 旧段按新价目表计价（增量追加永远补不出旧段的 cost）。
+      logs.a = [...step5Events(), { type: 'assistant/message', seq: 3, time: Date.UTC(2026, 9, 12, 5, 0, 0), data: { turn: 1, step: 2, message: { role: 'assistant', content: [] }, usage: USAGE } } as unknown as SessionEvent]
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      // 第二次读取是全量（from=0），而非增量 from=2。
+      expect(reads).toEqual(['from=0', 'from=0'])
+      expect(after.total.cost).toBeGreaterThan(0)
+      expect(after.byModel['step-5-preview']?.calls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refolds a cache hit whose unpriced model becomes priced on a stamped backend (PR #90 P1)', async () => {
+    // 生产形态的宿主（有 locate → 稳定 stamp）下，预热折叠会同时写入 cache 行与
+    // 账本行。价目表就绪后的下一轮：账本门触发落穿，但若 cache 命中路径没有同一
+    // 道门，就会零读取复用旧折叠 —— 空闲会话 stamp 永不变，整个进程生命周期
+    // cost=0，只有重启才自愈。本用例守住 cache 命中路径的惰性失效门。
+    vi.useFakeTimers()
+    let dir: string | undefined
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      dir = await mkdtemp(join(tmpdir(), 'dsh-billing-reprice-cachehit-'))
+      const path = join(dir, 'a.jsonl')
+      await writeFile(path, 'seed')
+      let reads = 0
+      // 无账本（纯 cache 路径）+ 真实文件 locate → stamp 稳定（同 test 3 的形态）。
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads += 1
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const aggregator = createUsageAggregator(persistence)
+
+      // 第一轮：价目表未就绪 → cost=0、落 unpricedModels，写入 cache。
+      const before = await aggregator.aggregate()
+      expect(reads).toBe(1)
+      expect(before.byModel['step-5-preview']?.cost ?? 0).toBe(0)
+      expect(before.unpricedModels).toContain('step-5-preview')
+
+      // 价目表就绪后的下一轮：cache 命中路径必须让路（stamp 未变）。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      // 关键断言：日志被重新全量读取（不是 cache 零读取吞掉），cost 折出。
+      expect(reads).toBe(2)
+      expect(after.byModel['step-5-preview']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-5-preview')
+    } finally {
+      vi.useRealTimers()
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reuses a ledger row whose unpriced models stay unpriced, refolds when priced', async () => {
+    vi.useFakeTimers()
+    let dir: string | undefined
+    try {
+      const logs: Record<string, SessionEvent[]> = { a: step5Events() }
+      dir = await mkdtemp(join(tmpdir(), 'dsh-billing-reprice-'))
+      const path = join(dir, 'a.jsonl')
+      await writeFile(path, 'seed')
+      const info = await stat(path)
+      let reads = 0
+      const persistence = {
+        list: async () => [{ id: 'a' }],
+        locate: (meta: { id: SessionId }) => ({ kind: 'jsonl', path }),
+        readFrom: async (id: SessionId, fromSeq: number) => {
+          reads += 1
+          return { meta: { id }, events: (logs.a ?? []).filter(e => e.seq >= fromSeq) }
+        },
+      } as unknown as UsagePersistence
+      const fold = legacyFold()
+      fold.unpricedModels = ['step-5-preview']
+      const store = fakeLedgerStore([{
+        id: 'a',
+        stamp: `${String(info.mtimeMs)}:${String(info.size)}`,
+        foldVersion: FOLD_VERSION,
+        fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+        fold,
+      }])
+      const aggregator = createUsageAggregator(persistence, { ledger: store.store })
+
+      // 负向对照：模型仍未收录 → 账本行零读取复用（惰性失效不误伤未受影响行）。
+      const before = await aggregator.aggregate()
+      expect(reads).toBe(0)
+      expect(before.unpricedModels).toContain('step-5-preview')
+
+      // 价目表注入后：账本行失效重折，cost>0、unpriced 标记清除、账本行重写。
+      applyLivePricing({
+        source: 'live',
+        rate: 7,
+        extraModels: [{ key: 'step-5-preview', name: 'Step 5 Preview', provider: 'Step', price: { input: 2, cacheHit: 0.2, output: 8 } }],
+      })
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(reads).toBe(1)
+      expect(after.byModel['step-5-preview']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.unpricedModels ?? []).not.toContain('step-5-preview')
+      expect(after.staleLedgerSessions ?? 0).toBe(0)
+      // 重折后的账本行须落盘：unpricedModels 已按新价目表清空（recordLedger 的
+      // changed 判定须识别惰性失效行，否则元数据全同会挡掉重写）。
+      await aggregator.flush()
+      expect(store.current().sessions[0]?.fold.unpricedModels).toEqual([])
+    } finally {
+      vi.useRealTimers()
+      if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 

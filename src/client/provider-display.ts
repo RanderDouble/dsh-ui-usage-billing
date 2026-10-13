@@ -56,6 +56,14 @@ export function hasCjk(name: string): boolean {
 // 「按通道聚合」视图与厂商行的通道徽标用：已知网关/官方端点给品牌名，
 // 未收录 origin 回退主机名，direct/unknown 由渲染层结合文案键处理。
 
+/** 已知 direct 路由的品牌显示名（不经 llm-pi-ai 路由表的第三方插件注册 adapter）。
+ *  与 aggregate.ts 的 KNOWN_ADAPTER_PROVIDERS 同源：那边决定哪些路由归位 direct
+ *  桶，这边决定桶在人界显示成什么品牌名。 */
+const DIRECT_ROUTE_NAMES: Readonly<Record<string, string>> = {
+  workbuddy: 'WorkBuddy',
+  'workbuddy-ai': 'WorkBuddy AI',
+}
+
 /** 已知站点 origin → 通道显示名（内置表；中英文都读品牌名，语言差异在 en 表兜底）。 */
 const CHANNEL_NAMES: Readonly<Record<string, string>> = {
   'https://tokenhub.tencentmaas.com': '腾讯云 TokenHub',
@@ -97,6 +105,11 @@ export function channelDisplayName(siteKey: string, lang: ProviderLang = 'zh'): 
     // 内置官方直连（不经 llm-pi-ai 网关，路由表里没有它的配置行）统一显示官方名，
     // 而非「直连 · deepseek-official」这类裸路由名。
     if (/^deepseek(?:-[a-z0-9-]+)?$/i.test(provider)) return lang === 'en' ? 'DeepSeek Official' : 'DeepSeek 官方'
+    // 已知的第三方插件注册 adapter 通道（workbuddy 等）显示品牌名，而非裸路由 id。
+    // 大小写归一化与聚合层 isKnownAdapterProvider 同姿态：归位 direct 的调用必须
+    // 同时拿到品牌名，不能出现「已计价但显示裸路由名」的两侧不一致。
+    const known = DIRECT_ROUTE_NAMES[provider.trim().toLowerCase()]
+    if (known !== undefined) return `${lang === 'en' ? 'Direct' : '直连'} · ${known}`
     return `${lang === 'en' ? 'Direct' : '直连'} · ${provider}`
   }
   return undefined
