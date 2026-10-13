@@ -273,12 +273,15 @@ npm publish --access public
 
 ## ❤️ Contributors
 
-- [@lucagiftzek](https://github.com/lucagiftzek) — 费率表 CSS 修整（PR #59）、`trustedHosts` 反代支持（PR #60）、币种偏好持久化（PR #58）、费率表搜索（PR #67）、峰谷指示点与固定到输入框（PR #68）、EUR 展示币种与界面语言解耦（PR #70）
-- [@hwangjunjie](https://github.com/hwangjunjie) — 腾讯云 TokenHub / Token Plan 订阅额度适配（`src/tc3.ts`）、提供商优先通道分组与网关徽标、`routeAliases` / `modelKeyAliases` 配置（PR #35）
+- [@lucagiftzek](https://github.com/lucagiftzek) — 费率表 CSS 修整（PR #59）、`trustedHosts` 反代支持（PR #60）、币种偏好持久化（PR #58）、费率表搜索（PR #67）、峰谷指示点与固定到输入框（PR #68）、EUR 展示币种与界面语言解耦（PR #70）、首次价目表拉取前置到预热回放（PR #55）、models.dev 收录按证据取舍（PR #56）、硬编码 UI 文案入词典（PR #61）
+- [@hwangjunjie](https://github.com/hwangjunjie) — 腾讯云 TokenHub / Token Plan 订阅额度适配（`src/tc3.ts`）、提供商优先通道分组与网关徽标、`routeAliases` / `modelKeyAliases` 配置（PR #35）、订阅徽标按三维格逐通道判定（PR #83）
 - [@ciphoo](https://github.com/ciphoo) — MiniMax 国内域 Token Plan 订阅额度支持（PR #5）、`minimax-cn` 订阅凭据接线（PR #12）、Windows 下账本并发写入 `MoveFileExW EPERM` 修复（PR #11）
 - [@fabulousyuann-tech](https://github.com/fabulousyuann-tech) — 会话删除后用量保留的持久 ledger 功能（PR #8）
 - [@hi-fangj](https://github.com/hi-fangj) — Token 每日图悬停精确明细（PR #21）、平价消耗胶囊开关（PR #22）、Token 每日图按模型视角与图例聚焦（PR #23）、性能面板按模型对比曲线（PR #24）
 - [@aizhimoran](https://github.com/aizhimoran) — 峰谷分档支持中国法定节假日与调休：DeepSeek 按量分时把法定节假日全天按空闲时段计费（官方 2026-09-19 口径），含 10 天倒计时扫描窗（issue #73、PR #74）
+- [@kidbird](https://github.com/kidbird) — 接入国际版 Z.ai Coding Plan（`zai-coding`）订阅额度，两条路由各自固定区域与 key 双字段分离（PR #79）
+- [@yuxu4468-hash](https://github.com/yuxu4468-hash) — 中转站裸模型 id 计费补录：Grok 4.5/4.6、GPT-5.5、GPT-6.1 Sol、Claude Opus 4.7/4.8、Fable 5（PR #87），GPT 绘图模型 `gpt-image-2` / `gpt-image-2.5-sunburst`（PR #88）
+- [@JinruiWang](https://github.com/JinruiWang) — workbuddy adapter 通道计价与「折叠早于实时价目表」双口径修复：已知通道名单、惰性补折三门（账本 / cache 命中 / 增量游标）与 stable-stamp 复现测试（issue #90）
 - [@gitfangj](https://github.com/gitfangj) — `sync.sh` 在 macOS 缺省 bash 3.2 下的花括号变量兼容修复
 
 ## 📄 许可证
