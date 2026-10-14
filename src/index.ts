@@ -786,13 +786,12 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   applyUserModelAliases(config.modelKeyAliases)
   // 已注册 adapter 的 provider 集合（宿主 llm 注册表）：llm-pi-ai 之外的插件路由
   // （ctx.llm.registerAdapter，issue #91 的 commandcode）经此归位 direct 桶按官方价
-  // 计费。软依赖：运行时无 llm 服务（理论不会）或访问异常时退化为空集，unknown 口径不变。
+  // 计费。读取走 ctx.get：沙箱属性访问要求 inject 声明（本插件 inject 不含 'llm'），
+  // ctx.get 软查找即可拿到宿主 llm 服务；服务缺失时退化为空集，unknown 口径不变。
   const registeredProvidersOf = (): ReadonlySet<string> => {
-    try {
-      return new Set(ctx.llm.listProviders().map(provider => provider.id))
-    } catch {
-      return new Set()
-    }
+    const llm = ctx.get('llm')
+    if (llm === undefined) return new Set()
+    return new Set(llm.listProviders().map(provider => provider.id))
   }
   // 模型别名的可变容器：config 与界面映射文件（.dsh-usage-aliases.json）合并后写入。
   // 本对象直接作为 options.modelKeyAliases 传入聚合器，foldFingerprintOf 每轮聚合

@@ -65,7 +65,7 @@ import type { createBillingBudgetStore } from './budget-store.ts'
 import { convertFromCny,
   applyBuiltinCatalog, applyLiveCatalogModels, applyLivePricing, applyUserPrices, catalogEntries, canonModelId, computeCost, convertUnitPrice,
   DEFAULT_PEAK_SHARE, formatMoney, formatPercent, formatTokens, formatUnitPrice, getRateInfo, getUserPrices, isPromoActive,
-  channelCountdown, localDayStamp, modelOf, normalizeOriginInput, rateChannelOf, tierAt, userOriginPriceEntryOf, userPriceOf, type CatalogModel, type CostCurrency, type ModelEntry, type TokenUsageBuckets,
+  channelCountdown, localDayStamp, modelOf, normalizeOriginInput, rateChannelOf, resolveCatalogKey, tierAt, userOriginPriceEntryOf, userPriceOf, type CatalogModel, type CostCurrency, type ModelEntry, type TokenUsageBuckets,
 } from './pricing.ts'
 import type { BalanceResponse, LivePricing, ProviderBalance, ReconcileNotice, RelayQuota, RelayResponse } from '../pricing-shared.ts'
 import type { ActualResponse, ActualSpendRow } from '../actual.ts'
@@ -116,11 +116,12 @@ export interface ModelHealth {
 const SESSION_DISPLAY_LIMIT = 20
 
 /** 仪表盘分区 Tab id。 */
-export type DashboardTab = 'overview' | 'token' | 'trends' | 'providers' | 'pricing' | 'settings'
+export type DashboardTab = 'overview' | 'token' | 'trends' | 'providers' | 'aliases' | 'pricing' | 'settings'
 
 /**
  * Tab 定义（顺序即渲染顺序）：概览=主数字/KPI/热力图，账单=厂商计费与订阅，
- * 用量=Token 用量，趋势=趋势图/每轮费用，费率=模型单价表，设置=预算与峰谷提醒。
+ * 用量=Token 用量，趋势=趋势图/每轮费用，映射=真实模型 id → 目录键映射，
+ * 费率=模型单价表，设置=预算与峰谷提醒。
  * 导出供测试断言 tab 与文案 key 对齐、decor 锚点落在正确分区。
  */
 export const DASHBOARD_TABS: readonly { id: DashboardTab; labelKey: UsageBillingKey }[] = [
@@ -128,6 +129,7 @@ export const DASHBOARD_TABS: readonly { id: DashboardTab; labelKey: UsageBilling
   { id: 'providers', labelKey: 'tabProviders' },
   { id: 'token', labelKey: 'tabToken' },
   { id: 'trends', labelKey: 'tabTrends' },
+  { id: 'aliases', labelKey: 'tabAliases' },
   { id: 'pricing', labelKey: 'tabPricing' },
   { id: 'settings', labelKey: 'tabSettings' },
 ]
@@ -1995,19 +1997,50 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
  * 服务端合并 config.modelKeyAliases 后原位注入聚合器折叠指纹，历史用量按新键重折。
  * 每行一个模型 id（纯文本）+ 目标目录下拉框；行来自仪表盘未收录集与服务端已存映射的并集。
  */
-function ModelAliasCard({ uncataloguedKeys, t }: {
-  /** 当前未收录的真实 model id（仪表盘 modelRows 里 uncatalogued 的 key）。 */
-  uncataloguedKeys: readonly string[]
+function ModelAliasCard({ health, t }: {
+  /** 探活得到的模型清单（按渠道分组的行来源；未探活时退化为目录外模型行）。 */
+  health: ModelHealth
   t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
 }): React.ReactNode {
   // 服务端已存映射（GET 合并视图）+ 本地编辑副本：drafts 只记录本次改动过的行。
   const [saved, setSaved] = useState<Readonly<Record<string, string>>>({})
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({})
   const [notice, setNotice] = useState('')
+  // 模糊匹配：与费率表搜索同一判定（key/名称/厂商三字段，大小写不敏感）。
+  const [query, setQuery] = useState('')
   // 目录键候选（下拉框选项）。
   const catalogKeys = catalogEntries().map(entry => entry.key)
-  // 行 = 未收录模型 ∪ 已存映射里的历史键（后者仍可改指或恢复原状）。
-  const rowKeys = [...new Set([...uncataloguedKeys, ...Object.keys(saved)])]
+  // 行 = 探活目录全量模型（按渠道分组；CatalogModel.provider 即渠道名）。
+  // 探活未完成时退化为仪表盘未收录模型，保证面板非空。
+  const grouped = useMemo(() => {
+    const rows = [...new Set([
+      ...(health.catalog ?? []).map(model => ({ id: model.id, channel: model.provider })),
+      ...(saved !== undefined ? [] : []),
+    ])]
+    // 已存映射的历史键若不在探活清单里（渠道已下线/探活失败），补进「已存映射」组。
+    const seen = new Set(rows.map(row => row.id))
+    for (const from of Object.keys(saved)) {
+      if (!seen.has(from)) rows.push({ id: from, channel: t('modelAliasSavedGroup') })
+    }
+    const groups = new Map<string, { id: string; channel: string }[]>()
+    for (const row of rows) {
+      const bucket = groups.get(row.channel)
+      if (bucket === undefined) groups.set(row.channel, [row])
+      else bucket.push(row)
+    }
+    for (const bucket of groups.values()) bucket.sort((a, b) => a.id.localeCompare(b.id))
+    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh'))
+  }, [health.catalog, saved, t])
+  // 模糊过滤后的分组（查询为空时原样）。
+  const filtered = useMemo(() => {
+    if (query.trim() === '') return grouped
+    return grouped
+      .map(([channel, rows]) => [channel, filterRateRows(rows.map(row => ({ ...row, key: row.id })), query)] as const)
+      .filter(([, rows]) => rows.length > 0)
+      .map(([channel, rows]) => [channel, rows.map(({ id }) => ({ id, channel }))] as [string, { id: string; channel: string }[]])
+  }, [grouped, query])
+  // 未匹配判定：探活模型在目录（含内置别名/派生候选）中无归属 → 高亮。
+  const unmatched = (id: string): boolean => resolveCatalogKey(id) === id && modelOf(id).key === 'other'
   // 首次挂载拉取服务端合并映射，作为编辑起点（config 别名也显示，改坏可恢复）。
   useEffect(() => {
     let cancelled = false
@@ -2028,9 +2061,11 @@ function ModelAliasCard({ uncataloguedKeys, t }: {
   const save = (): void => {
     // 保存：行内当前值非空且不等于自身才入映射，全量替换服务端文件。
     const aliases: Record<string, string> = {}
-    for (const from of rowKeys) {
-      const to = currentOf(from)
-      if (to !== '' && to !== from) aliases[from] = to
+    for (const [, rows] of grouped) {
+      for (const { id } of rows) {
+        const to = currentOf(id)
+        if (to !== '' && to !== id) aliases[id] = to
+      }
     }
     void fetch(ALIASES_PATH, {
       method: 'POST',
@@ -2055,45 +2090,62 @@ function ModelAliasCard({ uncataloguedKeys, t }: {
           <h3 className={css.setCardTitle}>{t('modelAliases')}</h3>
           <p className={css.setCardDesc}>{t('modelAliasesHint')}</p>
         </div>
+        <input
+          className={css.ubSearch}
+          type="search"
+          value={query}
+          placeholder={t('modelAliasSearch')}
+          aria-label={t('modelAliasSearch')}
+          data-testid="billing-alias-search"
+          onChange={event => { setQuery(event.target.value) }}
+        />
       </div>
       <div className={css.ctlCol}>
-        {rowKeys.length === 0 && (
+        {filtered.length === 0 && (
           <p className={css.setCardDesc} data-testid="billing-alias-none">{t('modelAliasNone')}</p>
         )}
-        {rowKeys.map(from => {
-          const current = currentOf(from)
-          // 已存映射指向目录之外的键时，补一个选项保证下拉能显示当前值。
-          const options = current !== '' && !catalogKeys.includes(current) ? [...catalogKeys, current] : catalogKeys
-          return (
-            <div key={from} className={css.userPriceRow} data-testid="billing-alias-row">
-              <div className={css.userPriceBody}>
-                <div className={css.userPriceLineMeta}>
-                  <div className={css.userPriceField}>
-                    <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
-                    <span className={css.aliasModelId} data-testid="billing-alias-from">{from}</span>
-                  </div>
-                  <div className={css.userPriceField}>
-                    <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
-                    <select
-                      className={css.userPriceInput}
-                      data-testid="billing-alias-to"
-                      value={current}
-                      aria-label={t('modelAliasTarget')}
-                      onChange={e => update(from, e.target.value)}
-                    >
-                      <option value="">{t('modelAliasUnmapped')}</option>
-                      {options.map(key => <option key={key} value={key}>{key}</option>)}
-                    </select>
+        {filtered.map(([channel, rows]) => (
+          <div key={channel} data-testid="billing-alias-group">
+            <div className={css.ctlLabel} data-testid="billing-alias-channel">{channel}</div>
+            {rows.map(({ id }) => {
+              const current = currentOf(id)
+              // 已存映射指向目录之外的键时，补一个选项保证下拉能显示当前值。
+              const options = current !== '' && !catalogKeys.includes(current) ? [...catalogKeys, current] : catalogKeys
+              return (
+                <div key={id} className={css.userPriceRow} data-testid="billing-alias-row">
+                  <div className={css.userPriceBody}>
+                    <div className={css.userPriceLineMeta}>
+                      <div className={css.userPriceField}>
+                        <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
+                        <span className={css.aliasModelId} data-testid="billing-alias-from">
+                          {id}
+                          {unmatched(id) && <span className={css.uncataloguedTag} data-testid="billing-alias-unmatched">{t('uncatalogued')}</span>}
+                        </span>
+                      </div>
+                      <div className={css.userPriceField}>
+                        <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
+                        <select
+                          className={css.userPriceInput}
+                          data-testid="billing-alias-to"
+                          value={current}
+                          aria-label={t('modelAliasTarget')}
+                          onChange={e => update(id, e.target.value)}
+                        >
+                          <option value="">{t('modelAliasUnmapped')}</option>
+                          {options.map(key => <option key={key} value={key}>{key}</option>)}
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
-          )
-        })}
+              )
+            })}
+          </div>
+        ))}
         {notice !== '' && (
           <p className={css.setCardDesc} data-testid="billing-alias-notice">{notice}</p>
         )}
-        {rowKeys.length > 0 && (
+        {filtered.length > 0 && (
           <div className={css.ctlRow}>
             <button type="button" className={css.exportButton} data-testid="billing-alias-save" onClick={save}>
               {t('modelAliasSave')}
@@ -2734,6 +2786,14 @@ function BillingDashboard({
     return sumByDayRange(byDay, localDayStamp(), kpiRange)
   }, [kpiRange, displayTotal, total, byDay])
 
+  // 实际消耗 KPI 卡：主数字 = 各来源累计之和（按币种直接相加展示，明细行里保留
+  // 逐来源原币种金额）；无采样来源时主数字显示占位。
+  const actualSpendTotalFmt = useMemo(() => {
+    if (actualSpend.length === 0) return '—'
+    const parts = actualSpend.map(row => `${row.currency === 'USD' ? '$' : '¥'}${row.total.toFixed(2)}`)
+    return parts.length === 1 ? parts[0] : parts.join(' + ')
+  }, [actualSpend])
+
   // Trend-chart legend: model rows sort by cost desc, so the stack bottoms
   // with the most expensive model (visually stable baseline).
   const chartModels = useMemo(
@@ -2942,15 +3002,6 @@ function BillingDashboard({
                       </span>
                     </span>
                   </div>
-                  {/* 实际消耗（余额采样差值）：与理论消耗并列的读数；无采样来源时不占位。 */}
-                  {actualSpend.length > 0 && (
-                    <div className={css.heroSideItem} data-testid="billing-hero-actual">
-                      <span className={css.heroSideLabel}>{t('actualSpend')}</span>
-                      <span className={css.heroSideValue}>
-                        {money(actualSpend.reduce((sum, row) => sum + row.month, 0))}
-                      </span>
-                    </div>
-                  )}
                   {monthCostProjected > 0 && (
                     <div className={css.heroSideItem}>
                       <span className={css.heroSideLabel}>
@@ -2965,51 +3016,6 @@ function BillingDashboard({
                   {monthCostProjected <= 0 && <span className={css.heroSideSpacer} aria-hidden="true" />}
                 </div>
               </section>
-
-              {/* 实际消耗卡：与理论消耗并列的实付口径（余额采样差值）。
-                  有采样来源即常驻渲染（全 0 也显示），让「采样在跑但没有差值」
-                  的状态可见；最近采样时刻标出采样窗口覆盖范围。 */}
-              {actualSpend.length > 0 && (
-                <section className={css.panel} data-testid="billing-panel-actual">
-                  <div className={css.panelHead}>
-                    <h3 className={css.panelTitle}>{t('actualSpendLedger')}</h3>
-                  </div>
-                  <p className={css.panelHint}>{t('actualSpendLedgerHint')}</p>
-                  <div className={css.tableScroll} data-testid="billing-actual-table">
-                    <table className={css.modelTable}>
-                      <thead>
-                        <tr>
-                          <th>{t('actualSpendProvider')}</th>
-                          <th className={css.numCol}>{t('todayCost')}</th>
-                          <th className={css.numCol}>{t('monthCost')}</th>
-                          <th className={css.numCol}>{t('actualSpendAccrued')}</th>
-                          <th className={css.numCol}>{t('actualSpendSampledAt')}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {actualSpend.map(row => (
-                          <tr key={row.provider} data-testid={`billing-actual-row-${row.provider}`}>
-                            <td>
-                              <span className={css.modelCell}>
-                                <span>
-                                  <span className={css.modelName}>{row.displayName}</span>
-                                  <span className={css.modelProvider}>{row.currency}</span>
-                                </span>
-                              </span>
-                            </td>
-                            <td className={css.numCol}>{row.currency === 'USD' ? `$${row.today.toFixed(2)}` : money(row.today)}</td>
-                            <td className={css.numCol}>{row.currency === 'USD' ? `$${row.month.toFixed(2)}` : money(row.month)}</td>
-                            <td className={css.numCol}>{row.currency === 'USD' ? `$${row.total.toFixed(2)}` : money(row.total)}</td>
-                            <td className={css.numCol}>
-                              {row.lastSampleAt > 0 ? `${localDayStamp(row.lastSampleAt)} ${formatClock(row.lastSampleAt)}` : '—'}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-              )}
 
               {/* 未计价模型提示：目录外/无价模型费用按 0 计，提醒用户自查并反馈。 */}
               {(stats.unpricedModels?.length ?? 0) > 0 && (
@@ -3120,6 +3126,22 @@ function BillingDashboard({
                     <span className={css.kpiLabel}>{t('tokenPeak')}</span>
                     <span className={css.kpiValue}>{kpiAgg.peakTokens > 0 ? shortNumber(kpiAgg.peakTokens) : '—'}</span>
                     <span className={css.kpiDetail}>{kpiAgg.peakDay ?? '—'}</span>
+                  </div>
+                  {/* 实际消耗（余额采样差值）：KPI 第 8 卡。理论消耗按 token×官网价，
+                      实际消耗按账户余额下降量，两本账并列互不混合。
+                      明细行 = 各来源按币种折合后的今日/累计金额；无采样来源显示占位。 */}
+                  <div className={css.kpiTile} data-testid="billing-kpi-actual">
+                    <span className={css.kpiLabel}>{t('actualSpend')}</span>
+                    <span className={css.kpiValue}>
+                      {actualSpendTotalFmt}
+                    </span>
+                    <span className={css.kpiDetail}>
+                      {actualSpend.length > 0
+                        ? actualSpend
+                            .map(row => `${row.currency === 'USD' ? '$' : '¥'}${row.today.toFixed(2)} / ${row.currency === 'USD' ? '$' : '¥'}${row.total.toFixed(2)}`)
+                            .join(' · ')
+                        : t('actualSpendNone')}
+                    </span>
                   </div>
                 </section>
               </div>
@@ -3530,11 +3552,14 @@ function BillingDashboard({
               {/* 5. 自定义单价：set-card——已存价列表 + 新增行；显示层重估，口径差异见说明。 */}
               <UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} />
 
-              {/* 5.5 模型手动映射：把未收录的真实 model id 指到目录条目；保存触发服务端重折。 */}
-              <ModelAliasCard uncataloguedKeys={modelRows.filter(row => row.uncatalogued).map(row => row.key)} t={t} />
-
               {/* 6. 插件信息卡：作者 / 仓库 / 版本 / 许可证（设置 Tab 常驻）。 */}
               <PluginInfoCard t={t} version={stats.pluginVersion} />
+            </div>
+          )}
+
+          {tab === 'aliases' && (
+            <div className={css.tabPanel} data-testid="billing-tab-panel-aliases">
+              <ModelAliasCard health={health} t={t} />
             </div>
           )}
 

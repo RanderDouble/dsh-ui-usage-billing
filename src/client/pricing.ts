@@ -752,10 +752,14 @@ function extraModelByKey(): ReadonlyMap<string, ExtraModelPrice> {
 /**
  * 由一个未知模型 id 派生候选 id（仅当直接查全部未命中时才尝试）：
  * - 剥离组织前缀（`deepseek/deepseek-v4-flash` → `deepseek-v4-flash`）；
+ * - 剥离渠道前缀（`sn-deepseek-v4-1-flash` → `deepseek-v4-1-flash`，覆盖商汤
+ *   raccoon / SenseNova 通道的 `sn-` 命名）；
+ * - 剥离尾部 `-free` 后缀（`mimo-v2.5-free` → `mimo-v2.5`，覆盖免费通道对
+ *   既有模型的重新命名——计费仍按底层模型口径）；
  * - 剥离尾部纯数字段（`deepseek-v4-flash-202605` / `-0731` → `deepseek-v4-flash`，
  *   覆盖 TokenHub / 官方按日期滚动的快照 id）；
- * - 两者组合派生。目录键本身（如 `mistral-large-2512`、`command-a-03-2025`）
- *   在直接查就已命中，永不进入派生分支，不受剥段影响。
+ * - 各前缀与后缀组合派生。目录键本身（如 `mistral-large-2512`、
+ *   `command-a-03-2025`）在直接查就已命中，永不进入派生分支，不受剥段影响。
  */
 function derivedKeyCandidates(id: string): string[] {
   const out: string[] = []
@@ -771,13 +775,20 @@ function derivedKeyCandidates(id: string): string[] {
       push(base)
     }
   }
+  const prefixes: string[] = [id]
   const slash = id.lastIndexOf('/')
-  if (slash > 0 && slash < id.length - 1) {
-    const bare = id.slice(slash + 1)
-    push(bare)
-    stripTrailingDigits(bare)
+  if (slash > 0 && slash < id.length - 1) prefixes.unshift(id.slice(slash + 1))
+  if (id.startsWith('sn-') && id.length > 3) prefixes.unshift(id.slice(3))
+  for (const base of prefixes) {
+    push(base)
+    // 尾部 -free 后缀：免费通道对既有模型的重命名，剥后按底层模型计价。
+    if (base.endsWith('-free') && base.length > 5) {
+      const bare = base.slice(0, -5)
+      push(bare)
+      stripTrailingDigits(bare)
+    }
+    stripTrailingDigits(base)
   }
-  stripTrailingDigits(id)
   return out
 }
 

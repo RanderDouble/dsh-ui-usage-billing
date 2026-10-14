@@ -1129,6 +1129,14 @@ export const BUILTIN_MODEL_KEY_ALIASES: Readonly<Record<string, string>> = {
   'hunyuan-hy4': 'hunyuan-hy4-preview',
   'longcat-2.0': 'longcat-2.0',
   'longcat-2': 'longcat-2.0',
+  // LongCat 2.5 Preview（美团新预览版，our-free-model 免费通道 id `longcat-2.5-preview-free`）：
+  // 无独立公开价，归并到 LongCat 2.0 条目按估算价计。
+  'longcat-2.5-preview': 'longcat-2.0',
+  'longcat-2-5-preview': 'longcat-2.0',
+  // 商汤日日新 6.8 系列（raccoon 通道 id `sn-sensenova-6-8-flash` / `-lite`，
+  // 剥 sn- 后归一化无法对上 6.5 条目）：归并到 sensenova 条目按估算价计。
+  'sensenova-6-8-flash': 'sensenova',
+  'sensenova-6-8-flash-lite': 'sensenova',
   'minicpm-v-4.5': 'minicpm-v-4.5',
   'minicpm-v-4.5-thinking': 'minicpm-v-4.5',
   'ernie-4.5': 'ernie-4.5',
