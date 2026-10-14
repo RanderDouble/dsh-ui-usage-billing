@@ -274,6 +274,18 @@ body {
   text-overflow: ellipsis;
 }
 
+/* 实际消耗小字（余额采样差值）：主数字下方的弱化副行。 */
+.triggerActual {
+  font-size: 10px;
+  line-height: 13px;
+  color: var(--ds-t-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 近 7 天 sparkline：常驻迷你趋势，底对齐。 */
 .triggerSpark {
   display: flex;

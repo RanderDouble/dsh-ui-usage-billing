@@ -201,6 +201,12 @@ export interface CustomBalanceConfig {
     method?: string;
     /** 请求头；值支持 `{{ENV_NAME}}` 占位符，经凭据 seam 解析（仅请求头支持）。 */
     headers?: Record<string, string>;
+    /**
+     * 积分单价（人民币元/积分）：端点返回的 remaining 是积分个数（如 CodeBuddy
+     * 按积分扣费）时设置。设置后余额按「积分 × 单价」折算成人民币，差值账本
+     * 记录的每笔实际消耗即为折算金额；缺省把 remaining 当作原生余额值。
+     */
+    creditUnitPrice?: number;
     /** 余额提取规则。 */
     extract: {
         remaining: CustomBalanceExtract;

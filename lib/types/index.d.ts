@@ -123,6 +123,12 @@ export interface UsageBillingConfig {
      * 如 `{ "hy4-preview": "hunyuan" }`）。聚合折叠与客户端渲染共用同一映射。
      */
     modelKeyAliases?: Record<string, string>;
+    /** 实际消耗采样间隔（毫秒）；默认 10 分钟。 */
+    actualSampleIntervalMs?: number;
+    /** 实际消耗账本（余额采样序列）的持久化路径；默认 `<harness home>/.dsh-usage-actual.json`。 */
+    actualLedgerPath?: string;
+    /** 界面模型映射（POST /api/billing/aliases 写入）的持久化路径；默认 `<harness home>/.dsh-usage-aliases.json`。 */
+    aliasesPath?: string;
 }
 /**
  * Create the atomic file-backed durable-ledger store. The previous complete file

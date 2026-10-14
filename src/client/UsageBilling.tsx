@@ -68,6 +68,7 @@ import { convertFromCny,
   channelCountdown, localDayStamp, modelOf, normalizeOriginInput, rateChannelOf, tierAt, userOriginPriceEntryOf, userPriceOf, type CatalogModel, type CostCurrency, type ModelEntry, type TokenUsageBuckets,
 } from './pricing.ts'
 import type { BalanceResponse, LivePricing, ProviderBalance, ReconcileNotice, RelayQuota, RelayResponse } from '../pricing-shared.ts'
+import type { ActualResponse, ActualSpendRow } from '../actual.ts'
 import type { SubscriptionQuota, SubscriptionResponse } from '../pricing-shared.ts'
 import { NS, zh, en, type UsageBillingKey } from './locales.ts'
 import { bandStateOf } from './band-dot.ts'
@@ -936,6 +937,12 @@ const PRICING_REFRESH_PATH = '/api/billing/pricing/refresh'
 /** Path to the account-balance endpoint served by this plugin's node half. */
 const BALANCE_PATH = '/api/billing/balance'
 
+/** Path to the actual-spend endpoint (balance-delta ledger) served by this plugin's node half. */
+const ACTUAL_PATH = '/api/billing/actual'
+
+/** Path to the UI model-alias mapping endpoint (GET/POST) served by this plugin's node half. */
+const ALIASES_PATH = '/api/billing/aliases'
+
 /** Path to the subscription-plan quota endpoint served by this plugin's node half. */
 const SUBSCRIPTIONS_PATH = '/api/billing/subscriptions'
 
@@ -1147,11 +1154,25 @@ export async function fetchReconcile(): Promise<ReconcileNotice | undefined> {
 }
 
 /**
+ * 拉取实际消耗（各来源余额采样差值账本）；失败返回空列表，由调用方降级。
+ * @returns the per-provider actual spend rows, or an empty list on any failure.
+ */
+async function fetchActualSpend(): Promise<readonly ActualSpendRow[]> {
+  try {
+    const response = await fetch(ACTUAL_PATH)
+    if (!response.ok) return []
+    const parsed = JSON.parse(await response.text()) as Partial<ActualResponse>
+    return Array.isArray(parsed.providers) ? parsed.providers : []
+  } catch {
+    return []
+  }
+}
+
+/**
  * 拉取订阅套餐剩余额度（供订阅面板）；失败返回空列表。
  * @returns the quota rows, or an empty list on any failure.
  */
-async function fetchSubscriptions(): Promise<readonly SubscriptionQuota[]> {
-  const response = await fetch(SUBSCRIPTIONS_PATH)
+async function fetchSubscriptions(): Promise<readonly SubscriptionQuota[]> {  const response = await fetch(SUBSCRIPTIONS_PATH)
   if (!response.ok) throw new Error(`subscriptions HTTP ${String(response.status)}`)
   const text = await response.text()
   const parsed = JSON.parse(text) as unknown
@@ -1303,6 +1324,8 @@ function UsageBillingTrigger(
     monthCost: number
     todayCost: number
     weekCost: number
+    /** 实际消耗（各来源余额采样差值）的今日合计；与 todayCost 并列显示。 */
+    actualToday: number
     /** 近 7 天迷你柱数据：cost=当日费用，tokens=当日消耗 token（input+output）。 */
     days: readonly { date: string; cost: number; tokens: number }[]
     /** 卡面主指标视角：花费金额 / Token 消耗。 */
@@ -1335,7 +1358,7 @@ function UsageBillingTrigger(
   // 币种跟随仪表盘选择：与 heatmap / round-chart / TrendChart 同一句式，先换算再格式化。
   const money = (cny: number): string => formatMoney(convertFromCny(cny, props.currency), props.currency)
   const {
-    wide, t, onOpen, monthCost, todayCost, weekCost, days, vendorStatus, dash,
+    wide, t, onOpen, monthCost, todayCost, weekCost, actualToday, days, vendorStatus, dash,
     floatPrefs, subscriptions, cardPrefs, monthTokens, todayTokens, weekTokens, budgetPressure,
   } = props
 
@@ -1501,12 +1524,20 @@ function UsageBillingTrigger(
               return tokenView ? (
                 <span className={css.triggerMetric} data-testid="billing-trigger-span-tokens">{formatTokens(spanValue)}</span>
               ) : (
-                /* 币符与数值同行（issue #51 修正）：column 布局下需显式包横排行，
-                   否则 ¥ 与数字被拆成两行堆叠。 */
-                <span className={css.triggerValueRow}>
-                  <span className={css.triggerYen} aria-hidden="true">{money(spanValue).charAt(0)}</span>
-                  <span className={css.triggerMetric} data-testid="billing-trigger-span-money">{money(spanValue).slice(1)}</span>
-                </span>
+                <>
+                  {/* 币符与数值同行（issue #51 修正）：column 布局下需显式包横排行，
+                     否则 ¥ 与数字被拆成两行堆叠。 */}
+                  <span className={css.triggerValueRow}>
+                    <span className={css.triggerYen} aria-hidden="true">{money(spanValue).charAt(0)}</span>
+                    <span className={css.triggerMetric} data-testid="billing-trigger-span-money">{money(spanValue).slice(1)}</span>
+                  </span>
+                  {/* 实际消耗（余额采样差值）小字并列；无采样时 0 不渲染，保持卡面干净。 */}
+                  {actualToday > 0 && (
+                    <span className={css.triggerActual} data-testid="billing-trigger-actual">
+                      {t('actualSpend')} {money(actualToday)}
+                    </span>
+                  )}
+                </>
               )
             })()}
           </span>
@@ -1656,6 +1687,8 @@ interface BillingDashboardProps {
   onUserPrices: (next: UserPriceMap) => void
   health: ModelHealth
   balances: readonly ProviderBalance[]
+  /** 实际消耗行（各来源余额采样差值账本，/api/billing/actual）。 */
+  actualSpend: readonly ActualSpendRow[]
   /** 官方余额差对账提示（drift 时非空，展示在余额区块）。 */
   reconcile?: ReconcileNotice
   quotas: readonly SubscriptionQuota[]
@@ -1956,8 +1989,166 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
   )
 }
 
+/**
+ * 设置 Tab 的模型手动映射卡：把未收录的真实 model id 指到计费目录条目。
+ * 映射经 POST /api/billing/aliases 写入服务端（.dsh-usage-aliases.json 持久化），
+ * 服务端合并 config.modelKeyAliases 后原位注入聚合器折叠指纹，历史用量按新键重折。
+ * 候选目录键来自 catalogEntries()；候选模型行来自仪表盘 modelRows 的 uncatalogued 集。
+ */
+function ModelAliasCard({ uncataloguedKeys, t }: {
+  /** 当前未收录的真实 model id（仪表盘 modelRows 里 uncatalogued 的 key）。 */
+  uncataloguedKeys: readonly string[]
+  t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
+}): React.ReactNode {
+  // 服务端已存映射（GET 合并视图）+ 本地编辑副本 + 勾选集合：与 UserPriceCard 同款交互。
+  const [saved, setSaved] = useState<Readonly<Record<string, string>>>({})
+  const [drafts, setDrafts] = useState<{ from: string; to: string }[]>([])
+  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [notice, setNotice] = useState('')
+  // 目录键候选（datalist）。
+  const modelKeys = catalogEntries().map(entry => entry.key)
+  // 首次挂载拉取服务端合并映射，作为编辑起点（config 别名也显示，改坏可删行）。
+  useEffect(() => {
+    let cancelled = false
+    void fetch(ALIASES_PATH).then(response => response.json() as Promise<{ aliases?: Record<string, string> }>)
+      .then(doc => {
+        if (cancelled || doc.aliases === undefined || typeof doc.aliases !== 'object') return
+        setSaved(doc.aliases)
+        setDrafts(Object.entries(doc.aliases).map(([from, to]) => ({ from, to })))
+      })
+      .catch(() => { /* 拉取失败保留空编辑态，保存仍可用 */ })
+    return () => { cancelled = true }
+  }, [])
+  const toggleSelect = (i: number): void =>
+    setSelected(s => {
+      const next = new Set(s)
+      if (next.has(i)) next.delete(i); else next.add(i)
+      return next
+    })
+  const removeSelected = (): void => {
+    setDrafts(list => list.filter((_, idx) => !selected.has(idx)))
+    setSelected(new Set())
+  }
+  const update = (i: number, patch: Partial<{ from: string; to: string }>): void =>
+    setDrafts(list => list.map((row, idx) => (idx === i ? { ...row, ...patch } : row)))
+  const add = (): void => setDrafts(list => [...list, { from: '', to: '' }])
+  const save = (): void => {
+    // 保存：去空行、去重（后行覆盖前行，同 UserPriceCard 语义），from=to 的无效行剔除。
+    const entries = drafts
+      .map(row => ({ from: row.from.trim(), to: row.to.trim() }))
+      .filter(row => row.from !== '' && row.to !== '' && row.from !== row.to)
+    const aliases: Record<string, string> = {}
+    for (const row of entries) aliases[row.from] = row.to
+    void fetch(ALIASES_PATH, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ aliases }),
+    }).then(response => {
+      if (!response.ok) throw new Error(`aliases HTTP ${String(response.status)}`)
+      return response.json() as Promise<{ aliases?: Record<string, string> }>
+    }).then(doc => {
+      if (doc.aliases === undefined || typeof doc.aliases !== 'object') throw new Error('aliases: invalid response')
+      setSaved(doc.aliases)
+      setDrafts(Object.entries(doc.aliases).map(([from, to]) => ({ from, to })))
+      setNotice(t('modelAliasSaved'))
+    }).catch(() => {
+      setNotice('')
+    })
+  }
+  return (
+    <section className={css.setCard} data-testid="billing-model-aliases">
+      <div className={css.setCardHead}>
+        <div className={css.setCardMeta}>
+          <h3 className={css.setCardTitle}>{t('modelAliases')}</h3>
+          <p className={css.setCardDesc}>{t('modelAliasesHint')}</p>
+        </div>
+      </div>
+      <div className={css.ctlCol}>
+        <datalist id="billing-alias-model-keys">
+          {modelKeys.map(key => <option key={key} value={key} />)}
+        </datalist>
+        {/* 未收录模型快捷添加：一行一个「未收录 id → 待选目录键」。 */}
+        {uncataloguedKeys.length === 0 && drafts.length === 0 && (
+          <p className={css.setCardDesc} data-testid="billing-alias-none">{t('modelAliasNone')}</p>
+        )}
+        {drafts.map((row, i) => (
+          <div key={i} className={css.userPriceRow} data-testid="billing-alias-row">
+            <input
+              type="checkbox"
+              className={css.userPriceCheck}
+              data-testid="billing-alias-select"
+              checked={selected.has(i)}
+              aria-label={t('userPriceSelect')}
+              onChange={() => toggleSelect(i)}
+            />
+            <div className={css.userPriceBody}>
+              <div className={css.userPriceLineMeta}>
+                <div className={css.userPriceField}>
+                  <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
+                  <input
+                    className={css.userPriceInput}
+                    data-testid="billing-alias-from"
+                    type="text"
+                    value={row.from}
+                    placeholder="deepseek-v4-turbo"
+                    aria-label={t('modelAliasModel')}
+                    onChange={e => update(i, { from: e.target.value })}
+                  />
+                </div>
+                <div className={css.userPriceField}>
+                  <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
+                  <input
+                    className={css.userPriceInput}
+                    data-testid="billing-alias-to"
+                    type="text"
+                    list="billing-alias-model-keys"
+                    value={row.to}
+                    placeholder="deepseek-chat"
+                    aria-label={t('modelAliasTarget')}
+                    onChange={e => update(i, { to: e.target.value })}
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+        {notice !== '' && (
+          <p className={css.setCardDesc} data-testid="billing-alias-notice">{notice}</p>
+        )}
+        <div className={css.ctlRow}>
+          <button
+            type="button"
+            className={css.exportButton}
+            data-testid="billing-alias-add"
+            onClick={() => {
+              add()
+              setNotice('')
+            }}
+          >
+            {t('modelAliasAdd')}
+          </button>
+          <button
+            type="button"
+            className={css.exportButton}
+            data-testid="billing-alias-remove-selected"
+            disabled={selected.size === 0}
+            onClick={removeSelected}
+          >
+            {t('modelAliasRemoveSelected')}{selected.size > 0 ? ` (${selected.size})` : ''}
+          </button>
+          <button type="button" className={css.exportButton} data-testid="billing-alias-save" onClick={save}>
+            {t('modelAliasSave')}
+          </button>
+        </div>
+      </div>
+      {/* saved 仅用于把服务端状态拉进 React；避免未使用变量告警的显式引用。 */}
+      <span hidden data-testid="billing-alias-saved-count">{Object.keys(saved).length}</span>
+    </section>
+  )
+}
+
 function BillingDashboard({
-  stats, t, onClose, userPrices, onUserPrices, health, balances, reconcile, quotas, relayQuotas, currency, onCurrency, language, onLanguage, turns,
+  stats, t, onClose, userPrices, onUserPrices, health, balances, actualSpend, reconcile, quotas, relayQuotas, currency, onCurrency, language, onLanguage, turns,
   renderSlot, budgetEnabled, budgetAmount, onToggleBudget, onBudgetAmount,
   peakConfig, onPeakConfig, onPreviewPeak, floatPrefs, onFloatPrefs, cardPrefs, onCardPrefs, sitePrefs, onSitePrefs,
   liveCostPrefs, onLiveCostPrefs, quotasStale,
@@ -2791,6 +2982,15 @@ function BillingDashboard({
                       </span>
                     </span>
                   </div>
+                  {/* 实际消耗（余额采样差值）：与理论消耗并列的读数；无采样来源时不占位。 */}
+                  {actualSpend.length > 0 && (
+                    <div className={css.heroSideItem} data-testid="billing-hero-actual">
+                      <span className={css.heroSideLabel}>{t('actualSpend')}</span>
+                      <span className={css.heroSideValue}>
+                        {money(actualSpend.reduce((sum, row) => sum + row.month, 0))}
+                      </span>
+                    </div>
+                  )}
                   {monthCostProjected > 0 && (
                     <div className={css.heroSideItem}>
                       <span className={css.heroSideLabel}>
@@ -3324,6 +3524,9 @@ function BillingDashboard({
 
               {/* 5. 自定义单价：set-card——已存价列表 + 新增行；显示层重估，口径差异见说明。 */}
               <UserPriceCard userPrices={userPrices} onUserPrices={onUserPrices} t={t} />
+
+              {/* 5.5 模型手动映射：把未收录的真实 model id 指到目录条目；保存触发服务端重折。 */}
+              <ModelAliasCard uncataloguedKeys={modelRows.filter(row => row.uncatalogued).map(row => row.key)} t={t} />
 
               {/* 6. 插件信息卡：作者 / 仓库 / 版本 / 许可证（设置 Tab 常驻）。 */}
               <PluginInfoCard t={t} version={stats.pluginVersion} />
@@ -4203,6 +4406,7 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
   const [health, setHealth] = useState<ModelHealth>(IDLE_HEALTH)
   const [balances, setBalances] = useState<readonly ProviderBalance[]>([])
   const [reconcile, setReconcile] = useState<ReconcileNotice | undefined>(undefined)
+  const [actualSpend, setActualSpend] = useState<readonly ActualSpendRow[]>([])
   const [quotas, setQuotas] = useState<readonly SubscriptionQuota[]>([])
   // 订阅刷新是否失败：失败时保留上次成功快照并标记 stale（展示「缓存」）。
   const [quotasStale, setQuotasStale] = useState(false)
@@ -4289,6 +4493,10 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
       if (balances.length > 0) setBalances(balances)
       setReconcile(reconcile)
     })
+    void fetchActualSpend().then((rows) => {
+      // 实际消耗：空数组是合法结果（无采样来源），成功即覆盖；请求失败保留旧快照。
+      setActualSpend(rows)
+    })
     void fetchSubscriptions().then((list) => {
       if (list.length > 0) {
         setQuotas(list)
@@ -4371,6 +4579,9 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
     .filter(([date]) => date.startsWith(today.slice(0, 7)))
     .reduce((sum, [, day]) => sum + day.cost, 0)
   const todayCost = displayStats.byDay[today]?.cost ?? 0
+  // 实际消耗（各来源余额采样差值）：随轮询与理论消耗同步刷新，透传触发卡与概览。
+  // 币种不做换算：折算币种（CNY 积分价）之外的原生余额行按账面值直接相加。
+  const actualToday = actualSpend.reduce((sum, row) => sum + row.today, 0)
   // 触发卡 hover 速览：本周累计 + 近 7 天迷你柱。
   // 「本周」按自然周（周一起算，与标签语义一致，issue #39）：周一时它 ≈ 当日，
   // 不再是「近 7 天」把上周用量卷进来、与当月几乎相等的错位。
@@ -4636,6 +4847,7 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
         monthCost={monthCost}
         todayCost={todayCost}
         weekCost={weekCost}
+        actualToday={actualToday}
         days={last7}
         vendorStatus={vendorStatus}
         dash={dash}
@@ -4656,6 +4868,7 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
           onUserPrices={updateUserPrices}
           health={health}
           balances={balances}
+          actualSpend={actualSpend}
           {...(reconcile === undefined ? {} : { reconcile })}
           quotas={quotas}
           relayQuotas={relayQuotas}
