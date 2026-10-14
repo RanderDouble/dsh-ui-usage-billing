@@ -2,6 +2,7 @@
   "name": "@randerdouble/dsh-ui-usage-billing",
   "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs, with a separate actual-spend ledger from balance sampling.",
   "version": "1.4.31",
+  "author": "RanderDouble",
   "keywords": [
     "deepseek-harness",
     "deepseek",

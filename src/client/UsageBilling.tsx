@@ -1993,52 +1993,45 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
  * 设置 Tab 的模型手动映射卡：把未收录的真实 model id 指到计费目录条目。
  * 映射经 POST /api/billing/aliases 写入服务端（.dsh-usage-aliases.json 持久化），
  * 服务端合并 config.modelKeyAliases 后原位注入聚合器折叠指纹，历史用量按新键重折。
- * 候选目录键来自 catalogEntries()；候选模型行来自仪表盘 modelRows 的 uncatalogued 集。
+ * 每行一个模型 id（纯文本）+ 目标目录下拉框；行来自仪表盘未收录集与服务端已存映射的并集。
  */
 function ModelAliasCard({ uncataloguedKeys, t }: {
   /** 当前未收录的真实 model id（仪表盘 modelRows 里 uncatalogued 的 key）。 */
   uncataloguedKeys: readonly string[]
   t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
 }): React.ReactNode {
-  // 服务端已存映射（GET 合并视图）+ 本地编辑副本 + 勾选集合：与 UserPriceCard 同款交互。
+  // 服务端已存映射（GET 合并视图）+ 本地编辑副本：drafts 只记录本次改动过的行。
   const [saved, setSaved] = useState<Readonly<Record<string, string>>>({})
-  const [drafts, setDrafts] = useState<{ from: string; to: string }[]>([])
-  const [selected, setSelected] = useState<ReadonlySet<number>>(new Set())
+  const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({})
   const [notice, setNotice] = useState('')
-  // 目录键候选（datalist）。
-  const modelKeys = catalogEntries().map(entry => entry.key)
-  // 首次挂载拉取服务端合并映射，作为编辑起点（config 别名也显示，改坏可删行）。
+  // 目录键候选（下拉框选项）。
+  const catalogKeys = catalogEntries().map(entry => entry.key)
+  // 行 = 未收录模型 ∪ 已存映射里的历史键（后者仍可改指或恢复原状）。
+  const rowKeys = [...new Set([...uncataloguedKeys, ...Object.keys(saved)])]
+  // 首次挂载拉取服务端合并映射，作为编辑起点（config 别名也显示，改坏可恢复）。
   useEffect(() => {
     let cancelled = false
     void fetch(ALIASES_PATH).then(response => response.json() as Promise<{ aliases?: Record<string, string> }>)
       .then(doc => {
         if (cancelled || doc.aliases === undefined || typeof doc.aliases !== 'object') return
         setSaved(doc.aliases)
-        setDrafts(Object.entries(doc.aliases).map(([from, to]) => ({ from, to })))
+        setDrafts({})
       })
       .catch(() => { /* 拉取失败保留空编辑态，保存仍可用 */ })
     return () => { cancelled = true }
   }, [])
-  const toggleSelect = (i: number): void =>
-    setSelected(s => {
-      const next = new Set(s)
-      if (next.has(i)) next.delete(i); else next.add(i)
-      return next
-    })
-  const removeSelected = (): void => {
-    setDrafts(list => list.filter((_, idx) => !selected.has(idx)))
-    setSelected(new Set())
+  const currentOf = (from: string): string => drafts[from] ?? saved[from] ?? ''
+  const update = (from: string, to: string): void => {
+    setDrafts(d => ({ ...d, [from]: to }))
+    setNotice('')
   }
-  const update = (i: number, patch: Partial<{ from: string; to: string }>): void =>
-    setDrafts(list => list.map((row, idx) => (idx === i ? { ...row, ...patch } : row)))
-  const add = (): void => setDrafts(list => [...list, { from: '', to: '' }])
   const save = (): void => {
-    // 保存：去空行、去重（后行覆盖前行，同 UserPriceCard 语义），from=to 的无效行剔除。
-    const entries = drafts
-      .map(row => ({ from: row.from.trim(), to: row.to.trim() }))
-      .filter(row => row.from !== '' && row.to !== '' && row.from !== row.to)
+    // 保存：行内当前值非空且不等于自身才入映射，全量替换服务端文件。
     const aliases: Record<string, string> = {}
-    for (const row of entries) aliases[row.from] = row.to
+    for (const from of rowKeys) {
+      const to = currentOf(from)
+      if (to !== '' && to !== from) aliases[from] = to
+    }
     void fetch(ALIASES_PATH, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -2049,7 +2042,7 @@ function ModelAliasCard({ uncataloguedKeys, t }: {
     }).then(doc => {
       if (doc.aliases === undefined || typeof doc.aliases !== 'object') throw new Error('aliases: invalid response')
       setSaved(doc.aliases)
-      setDrafts(Object.entries(doc.aliases).map(([from, to]) => ({ from, to })))
+      setDrafts({})
       setNotice(t('modelAliasSaved'))
     }).catch(() => {
       setNotice('')
@@ -2064,82 +2057,49 @@ function ModelAliasCard({ uncataloguedKeys, t }: {
         </div>
       </div>
       <div className={css.ctlCol}>
-        <datalist id="billing-alias-model-keys">
-          {modelKeys.map(key => <option key={key} value={key} />)}
-        </datalist>
-        {/* 未收录模型快捷添加：一行一个「未收录 id → 待选目录键」。 */}
-        {uncataloguedKeys.length === 0 && drafts.length === 0 && (
+        {rowKeys.length === 0 && (
           <p className={css.setCardDesc} data-testid="billing-alias-none">{t('modelAliasNone')}</p>
         )}
-        {drafts.map((row, i) => (
-          <div key={i} className={css.userPriceRow} data-testid="billing-alias-row">
-            <input
-              type="checkbox"
-              className={css.userPriceCheck}
-              data-testid="billing-alias-select"
-              checked={selected.has(i)}
-              aria-label={t('userPriceSelect')}
-              onChange={() => toggleSelect(i)}
-            />
-            <div className={css.userPriceBody}>
-              <div className={css.userPriceLineMeta}>
-                <div className={css.userPriceField}>
-                  <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
-                  <input
-                    className={css.userPriceInput}
-                    data-testid="billing-alias-from"
-                    type="text"
-                    value={row.from}
-                    placeholder="deepseek-v4-turbo"
-                    aria-label={t('modelAliasModel')}
-                    onChange={e => update(i, { from: e.target.value })}
-                  />
-                </div>
-                <div className={css.userPriceField}>
-                  <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
-                  <input
-                    className={css.userPriceInput}
-                    data-testid="billing-alias-to"
-                    type="text"
-                    list="billing-alias-model-keys"
-                    value={row.to}
-                    placeholder="deepseek-chat"
-                    aria-label={t('modelAliasTarget')}
-                    onChange={e => update(i, { to: e.target.value })}
-                  />
+        {rowKeys.map(from => {
+          const current = currentOf(from)
+          // 已存映射指向目录之外的键时，补一个选项保证下拉能显示当前值。
+          const options = current !== '' && !catalogKeys.includes(current) ? [...catalogKeys, current] : catalogKeys
+          return (
+            <div key={from} className={css.userPriceRow} data-testid="billing-alias-row">
+              <div className={css.userPriceBody}>
+                <div className={css.userPriceLineMeta}>
+                  <div className={css.userPriceField}>
+                    <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
+                    <span className={css.aliasModelId} data-testid="billing-alias-from">{from}</span>
+                  </div>
+                  <div className={css.userPriceField}>
+                    <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
+                    <select
+                      className={css.userPriceInput}
+                      data-testid="billing-alias-to"
+                      value={current}
+                      aria-label={t('modelAliasTarget')}
+                      onChange={e => update(from, e.target.value)}
+                    >
+                      <option value="">{t('modelAliasUnmapped')}</option>
+                      {options.map(key => <option key={key} value={key}>{key}</option>)}
+                    </select>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        ))}
+          )
+        })}
         {notice !== '' && (
           <p className={css.setCardDesc} data-testid="billing-alias-notice">{notice}</p>
         )}
-        <div className={css.ctlRow}>
-          <button
-            type="button"
-            className={css.exportButton}
-            data-testid="billing-alias-add"
-            onClick={() => {
-              add()
-              setNotice('')
-            }}
-          >
-            {t('modelAliasAdd')}
-          </button>
-          <button
-            type="button"
-            className={css.exportButton}
-            data-testid="billing-alias-remove-selected"
-            disabled={selected.size === 0}
-            onClick={removeSelected}
-          >
-            {t('modelAliasRemoveSelected')}{selected.size > 0 ? ` (${selected.size})` : ''}
-          </button>
-          <button type="button" className={css.exportButton} data-testid="billing-alias-save" onClick={save}>
-            {t('modelAliasSave')}
-          </button>
-        </div>
+        {rowKeys.length > 0 && (
+          <div className={css.ctlRow}>
+            <button type="button" className={css.exportButton} data-testid="billing-alias-save" onClick={save}>
+              {t('modelAliasSave')}
+            </button>
+          </div>
+        )}
       </div>
       {/* saved 仅用于把服务端状态拉进 React；避免未使用变量告警的显式引用。 */}
       <span hidden data-testid="billing-alias-saved-count">{Object.keys(saved).length}</span>
@@ -3005,6 +2965,51 @@ function BillingDashboard({
                   {monthCostProjected <= 0 && <span className={css.heroSideSpacer} aria-hidden="true" />}
                 </div>
               </section>
+
+              {/* 实际消耗卡：与理论消耗并列的实付口径（余额采样差值）。
+                  有采样来源即常驻渲染（全 0 也显示），让「采样在跑但没有差值」
+                  的状态可见；最近采样时刻标出采样窗口覆盖范围。 */}
+              {actualSpend.length > 0 && (
+                <section className={css.panel} data-testid="billing-panel-actual">
+                  <div className={css.panelHead}>
+                    <h3 className={css.panelTitle}>{t('actualSpendLedger')}</h3>
+                  </div>
+                  <p className={css.panelHint}>{t('actualSpendLedgerHint')}</p>
+                  <div className={css.tableScroll} data-testid="billing-actual-table">
+                    <table className={css.modelTable}>
+                      <thead>
+                        <tr>
+                          <th>{t('actualSpendProvider')}</th>
+                          <th className={css.numCol}>{t('todayCost')}</th>
+                          <th className={css.numCol}>{t('monthCost')}</th>
+                          <th className={css.numCol}>{t('actualSpendAccrued')}</th>
+                          <th className={css.numCol}>{t('actualSpendSampledAt')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {actualSpend.map(row => (
+                          <tr key={row.provider} data-testid={`billing-actual-row-${row.provider}`}>
+                            <td>
+                              <span className={css.modelCell}>
+                                <span>
+                                  <span className={css.modelName}>{row.displayName}</span>
+                                  <span className={css.modelProvider}>{row.currency}</span>
+                                </span>
+                              </span>
+                            </td>
+                            <td className={css.numCol}>{row.currency === 'USD' ? `$${row.today.toFixed(2)}` : money(row.today)}</td>
+                            <td className={css.numCol}>{row.currency === 'USD' ? `$${row.month.toFixed(2)}` : money(row.month)}</td>
+                            <td className={css.numCol}>{row.currency === 'USD' ? `$${row.total.toFixed(2)}` : money(row.total)}</td>
+                            <td className={css.numCol}>
+                              {row.lastSampleAt > 0 ? `${localDayStamp(row.lastSampleAt)} ${formatClock(row.lastSampleAt)}` : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
 
               {/* 未计价模型提示：目录外/无价模型费用按 0 计，提醒用户自查并反馈。 */}
               {(stats.unpricedModels?.length ?? 0) > 0 && (

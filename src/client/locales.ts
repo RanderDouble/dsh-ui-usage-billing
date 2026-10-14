@@ -155,12 +155,16 @@ export type UsageBillingKey =
   | 'userPriceRemoveSelected'
   | 'userPriceSelect'
   | 'actualSpend'
+  | 'actualSpendLedger'
+  | 'actualSpendLedgerHint'
+  | 'actualSpendSampledAt'
+  | 'actualSpendAccrued'
+  | 'actualSpendProvider'
   | 'modelAliases'
   | 'modelAliasesHint'
   | 'modelAliasModel'
   | 'modelAliasTarget'
-  | 'modelAliasAdd'
-  | 'modelAliasRemoveSelected'
+  | 'modelAliasUnmapped'
   | 'modelAliasSave'
   | 'modelAliasSaved'
   | 'modelAliasNone'
@@ -461,12 +465,16 @@ export const zh: Record<UsageBillingKey, string> = {
   'userPricesHint': '为未收录或变价模型填入实付单价，总览与日趋势按此重估；模型可用下拉候选（目录键或模型 id）；来源留空=该模型默认价，填入中转站域名=仅该来源的同名模型用此价（协议可省）；低谷价三栏填后按峰/谷混合估算，留空=平档',
   'userPriceSave': '保存',
   'actualSpend': '实际',
+  'actualSpendLedger': '实际消耗（余额采样）',
+  'actualSpendLedgerHint': '按各来源余额定时采样的差值统计：与理论消耗（token 乘官网价）并列的实付口径。差值在余额变化后出现；最近采样时刻可见采样窗口覆盖范围。',
+  'actualSpendSampledAt': '最近采样',
+  'actualSpendAccrued': '累计',
+  'actualSpendProvider': '来源',
   'modelAliases': '模型手动映射',
   'modelAliasesHint': '把真实模型 id 指到目录条目：下拉选目标目录键，保存后历史用量按新键重新计价。仅列当前未收录的模型；删除映射恢复原状。',
   'modelAliasModel': '模型 id',
   'modelAliasTarget': '目录条目',
-  'modelAliasAdd': '添加映射',
-  'modelAliasRemoveSelected': '删除选中',
+  'modelAliasUnmapped': '未映射',
   'modelAliasSave': '保存映射',
   'modelAliasSaved': '已保存，正在重新计价',
   'modelAliasNone': '暂无未收录模型',
@@ -778,12 +786,16 @@ export const en: Record<UsageBillingKey, string> = {
   'userPricesHint': 'Enter actual per-1M-token prices; main views are re-costed. Pick a model key from the dropdown candidates. Leave source empty for the model default, or enter a relay origin (protocol optional) to price only that source. Fill all three off-peak fields for peak/off-peak estimation; leave them empty for flat pricing.',
   'userPriceSave': 'Save',
   'actualSpend': 'Actual',
+  'actualSpendLedger': 'Actual spend (balance sampling)',
+  'actualSpendLedgerHint': 'Spending measured from periodic balance-sample deltas: the paid figure alongside the theoretical one (tokens × list price). Deltas appear after a balance change; the last-sample time shows the window covered.',
+  'actualSpendSampledAt': 'Last sample',
+  'actualSpendAccrued': 'Accrued',
+  'actualSpendProvider': 'Provider',
   'modelAliases': 'Manual model mapping',
   'modelAliasesHint': 'Point a real model id at a catalog entry: pick the target key, save, and historical usage is re-priced under the new key. Only uncatalogued models are listed; removing a mapping restores the original.',
   'modelAliasModel': 'Model id',
   'modelAliasTarget': 'Catalog entry',
-  'modelAliasAdd': 'Add mapping',
-  'modelAliasRemoveSelected': 'Remove selected',
+  'modelAliasUnmapped': 'Unmapped',
   'modelAliasSave': 'Save mapping',
   'modelAliasSaved': 'Saved, re-pricing',
   'modelAliasNone': 'No uncatalogued models',

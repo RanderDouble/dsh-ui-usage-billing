@@ -8,9 +8,9 @@ export declare const PLUGIN_NAME = "@randerdouble/dsh-ui-usage-billing";
 /** 一句话描述。 */
 export declare const PLUGIN_DESCRIPTION = "Usage billing dashboard for DeepSeek Harness";
 /** 作者显示名。 */
-export declare const PLUGIN_AUTHOR_NAME = "KenZ";
+export declare const PLUGIN_AUTHOR_NAME = "RanderDouble";
 /** 作者 GitHub 账号（仓库/作者页链接）。 */
-export declare const PLUGIN_AUTHOR_HANDLE = "kenz1117";
+export declare const PLUGIN_AUTHOR_HANDLE = "RanderDouble";
 /** 源码仓库（可点击）。 */
 export declare const PLUGIN_REPOSITORY = "https://github.com/RanderDouble/dsh-ui-usage-billing";
 /** npm 包主页（可点击）。 */

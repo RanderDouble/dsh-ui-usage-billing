@@ -3830,6 +3830,20 @@ span.bandDot { cursor: default; }
   font-size: 11px;
 }
 
+/* 映射行的模型 id 纯文本读数：与输入框同高同宽，视觉上保持两列齐平。 */
+.aliasModelId {
+  min-width: 96px;
+  max-width: 240px;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ds-t-1);
+  background: var(--dsb-2);
+  border: 1px solid var(--ds-border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
 .userPriceInput,
 .userPriceInputNum {
   min-width: 96px;
