@@ -8,11 +8,17 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.4.30（2026-10-14）
+
+- 修复：**v1.4.29 发布产物缺 #91 别名**——构建漏了 `tsc -b` 步骤（tsdown 的入口是 lib/types 的 tsc 产物，单跑 tsdown 会静默打包旧产物），v1.4.29 的 bundle 不含本次改动；已在 npm 标记 deprecated，请直接用本版本。修复内容与 v1.4.29 相同：**中转站厂商前缀 id `deepseek/deepseek-v4.1-flash` 落「未收录」**（issue #91，感谢 @shiinakaze）——CommandCode 等 OpenRouter 式中转不改写上游 id、只加 `deepseek/` 命名空间前缀，canon 归一去分隔符后无法命中既有键；现补显式别名：`deepseek/deepseek-v4.1-flash` / `deepseek/deepseek-flash` → `flash`、`deepseek/deepseek-v4-pro` → `pro`，按官方目录价计费
+- 账本：**FOLD_VERSION 不 bump**——v1.4.28 的惰性失效（行内 `unpricedModels ∩ 现价目表` 非空即重折）已覆盖目录类补充：旧行把该 id 记在 unpricedModels，新别名注入后自动重折，无需全量重折
+- 构建：lib/client.js 252,657 字节 ≤ 256 KiB（262,144 字节）单文件上限，余量 9,487 字节（发布流程修正：构建必须 `tsc -b` → `tsdown` 两段，产物以内容断言复核后发布）
+
 ### v1.4.29（2026-10-14）
 
-- 修复：**中转站厂商前缀 id `deepseek/deepseek-v4.1-flash` 落「未收录」**（issue #91，感谢 @shiinakaze）——CommandCode 等 OpenRouter 式中转不改写上游 id、只加 `deepseek/` 命名空间前缀，canon 归一去分隔符后无法命中既有键；现补显式别名：`deepseek/deepseek-v4.1-flash` / `deepseek/deepseek-flash` → `flash`、`deepseek/deepseek-v4-pro` → `pro`，按官方目录价计费
-- 账本：**FOLD_VERSION 不 bump**——v1.4.28 的惰性失效（行内 `unpricedModels ∩ 现价目表` 非空即重折）已覆盖目录类补充：旧行把该 id 记在 unpricedModels，新别名注入后自动重折，无需全量重折
-- 构建：lib/client.js 252,657 字节 ≤ 256 KiB（262,144 字节）单文件上限，余量 9,487 字节
+> **已废弃**：产物缺 #91 别名（构建漏 tsc -b），npm 已标 deprecated，勿安装。
+
+- （内容同 v1.4.30，产物无效）
 
 ### v1.4.28（2026-10-13）
 
