@@ -28,6 +28,7 @@ import {
   AGGREGATE_TTL_MS, LEDGER_SAVE_INTERVAL_MS, SESSION_ROW_LIMIT, type UsagePersistence,
 } from '../src/aggregate.ts'
 import { isSubscriptionProviderId } from '../src/subscriptions.ts'
+import { applyUserModelAliases } from '../src/client/pricing.ts'
 
 /** Minimal `request/header` event recording the active model and provider. */
 function header(seq: number, model: string, provider = 'deepseek-official'): SessionEvent {
@@ -1262,7 +1263,7 @@ describe('createUsageAggregator (incremental cache)', () => {
       id: 'a',
       stamp: `${String(info.mtimeMs)}:${String(info.size)}`,
       foldVersion: FOLD_VERSION,
-      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
       fold: (() => { const row = legacyFold(); row.total.calls = 7; return row })(),
     }])
     const aggregator = createUsageAggregator(persistence, { ledger: store.store })
@@ -1362,7 +1363,7 @@ describe('createUsageAggregator (incremental cache)', () => {
         return inner.readFrom(id, fromSeq)
       },
     } as unknown as UsagePersistence
-    const fingerprint = configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY)
+    const fingerprint = configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set())
     const ledgerRows: UsageLedgerSession[] = []
     for (const id of ['h1', 'h2', 'h3']) {
       const info = await stat(paths[id]!)
@@ -1774,7 +1775,7 @@ describe('ledger foldVersion / stale confidence', () => {
     const { store, saved, current } = fakeLedgerStore([{
       id: 'fresh-session',
       foldVersion: FOLD_VERSION,
-      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+      fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
       fold: legacyFold(),
     }])
     const stats = await aggregateUsage(fakePersistence({}), { ledger: store })
@@ -2051,7 +2052,7 @@ describe('lazy reprice after live catalog arrives (fold-version preserved)', () 
         id: 'a',
         stamp: `${String(info.mtimeMs)}:${String(info.size)}`,
         foldVersion: FOLD_VERSION,
-        fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY),
+        fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
         fold,
       }])
       const aggregator = createUsageAggregator(persistence, { ledger: store.store })
@@ -2080,6 +2081,104 @@ describe('lazy reprice after live catalog arrives (fold-version preserved)', () 
     } finally {
       vi.useRealTimers()
       if (dir !== undefined) await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('registered adapter providers home to direct (issue #91)', () => {
+  /** 插件注册通道的最小日志：request/header 带 provider + model，message 报 usage。 */
+  function adapterLog(seq: number, provider: string, model: string): SessionEvent[] {
+    return [
+      header(seq, model, provider),
+      message(seq + 1, 1_000, USAGE),
+    ]
+  }
+
+  it('homes a host-registered adapter channel to direct:commandcode and prices it', async () => {
+    // llm-pi-ai 之外的插件路由（ctx.llm.registerAdapter）经 resolveRegisteredProviders
+    // 归位 direct:<provider>，按模型官方目录价计费——不再落 unknown 记 0。
+    const persistence = fakePersistence({
+      cc: adapterLog(0, 'commandcode', 'deepseek/deepseek-v4.1-flash'),
+    })
+    const stats = await aggregateUsage(persistence, {
+      resolveRegisteredProviders: () => new Set(['commandcode']),
+    })
+
+    const site = stats.bySite?.['direct:commandcode']
+    expect(site?.calls).toBe(1)
+    expect(site?.cost ?? 0).toBeGreaterThan(0)
+    // 不落 unknown（issue #82 的记 0 口径只留给宿主也不认识的通道）。
+    expect(stats.bySite?.unknown?.calls ?? 0).toBe(0)
+    // 厂商前缀 id 归一到 flash 键（v1.4.30 别名），费用 = flash 目录价。
+    expect(stats.byModel['flash']?.cost ?? 0).toBeGreaterThan(0)
+    expect(stats.byModel['deepseek/deepseek-v4.1-flash']).toBeUndefined()
+  })
+
+  it('keeps channels unknown to the host in the unknown bucket at zero cost', async () => {
+    // 未注册（宿主也不认识）的通道维持 issue #82 口径：token 照记、费用为 0。
+    const persistence = fakePersistence({
+      ghost: adapterLog(0, 'ghost-provider', 'deepseek/deepseek-v4.1-flash'),
+    })
+    const stats = await aggregateUsage(persistence, {
+      resolveRegisteredProviders: () => new Set(['commandcode']),
+    })
+
+    expect(stats.bySite?.unknown?.calls).toBe(1)
+    expect(stats.bySite?.unknown?.cost ?? 0).toBe(0)
+    expect(stats.bySite?.['direct:commandcode']).toBeUndefined()
+  })
+
+  it('refolds rows when the registered set changes (per-round fingerprint)', async () => {
+    // provider 插件装卸（llm/adapters-updated）后的第一轮聚合按新通道口径重折。
+    // fake timers 跳过聚合 TTL：否则第二轮直接命中上轮 doc，测不到重折。
+    vi.useFakeTimers()
+    try {
+      let registered = new Set(['commandcode'])
+      const persistence = fakePersistence({
+        cc: adapterLog(0, 'commandcode', 'deepseek/deepseek-v4.1-flash'),
+      })
+      const aggregator = createUsageAggregator(persistence, {
+        resolveRegisteredProviders: () => registered,
+      })
+
+      const before = await aggregator.aggregate()
+      expect(before.bySite?.['direct:commandcode']?.cost ?? 0).toBeGreaterThan(0)
+
+      registered = new Set()
+      vi.advanceTimersByTime(AGGREGATE_TTL_MS + 1000)
+      const after = await aggregator.aggregate()
+      expect(after.bySite?.unknown?.calls).toBe(1)
+      expect(after.bySite?.unknown?.cost ?? 0).toBe(0)
+      expect(after.bySite?.['direct:commandcode']).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('refolds rows when user model aliases change (fingerprint includes aliases)', async () => {
+    // 别名改动（issue #91 P2）：旧行按旧 key「zz-custom」未收录记 0；指纹含别名后
+    // 新聚合器强制重折，用量按新目录键 flash 计价，byModel 不再新旧 key 并存。
+    const { store, current } = fakeLedgerStore([])
+    const persistence = fakePersistence({
+      custom: [header(0, 'zz-custom', 'commandcode'), message(1, 1_000, USAGE)],
+    })
+    const before = await createUsageAggregator(persistence, { ledger: store }).aggregate()
+    expect(before.byModel['zz-custom']?.cost ?? 0).toBe(0)
+
+    applyUserModelAliases({ 'zz-custom': 'flash' })
+    try {
+      const after = await createUsageAggregator(persistence, {
+        ledger: store,
+        modelKeyAliases: { 'zz-custom': 'flash' },
+        resolveRegisteredProviders: () => new Set(['commandcode']),
+      }).aggregate()
+      expect(after.byModel['flash']?.cost ?? 0).toBeGreaterThan(0)
+      expect(after.byModel['zz-custom']).toBeUndefined()
+      // 旧行被重写（foldVersion 22 + 新指纹），不是新旧并存。
+      expect(current().sessions[0]?.foldVersion).toBe(FOLD_VERSION)
+      expect(Object.keys(current().sessions[0]?.fold.byModel ?? {})).toEqual(['flash'])
+    } finally {
+      applyUserModelAliases(undefined)
     }
   })
 })

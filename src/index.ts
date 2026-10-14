@@ -754,6 +754,16 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
   // 用户自定义模型别名：聚合启动前注入（与客户端渲染共用一张表，见 pricing.ts）。
   applyBuiltinCatalog(BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES)
   applyUserModelAliases(config.modelKeyAliases)
+  // 已注册 adapter 的 provider 集合（宿主 llm 注册表）：llm-pi-ai 之外的插件路由
+  // （ctx.llm.registerAdapter，issue #91 的 commandcode）经此归位 direct 桶按官方价
+  // 计费。软依赖：运行时无 llm 服务（理论不会）或访问异常时退化为空集，unknown 口径不变。
+  const registeredProvidersOf = (): ReadonlySet<string> => {
+    try {
+      return new Set(ctx.llm.listProviders().map(provider => provider.id))
+    } catch {
+      return new Set()
+    }
+  }
   const aggregator = createUsageAggregator(adaptSessionPersistence(ctx.sessionPersistence), {
     ...(config.subscriptionProviders === undefined
       ? {}
@@ -762,6 +772,10 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     ...(config.routeAliases === undefined ? {} : { routeAliases: config.routeAliases }),
     // 中转站零配置发现：每次聚合读 llm-pi-ai providers 的 baseURL（路由→站点映射）。
     resolveRoutes: () => readPiAiProviderRoutes(ctx.settings),
+    // 插件注册的 adapter 通道（llm-pi-ai 之外）按直连归位计价（issue #91）。
+    resolveRegisteredProviders: registeredProvidersOf,
+    // 用户模型别名进折叠指纹：别名改动让历史行按新目录键重折（issue #91 P2）。
+    ...(config.modelKeyAliases === undefined ? {} : { modelKeyAliases: config.modelKeyAliases }),
     // 项目归属用工作区标题命名（host workspaceRegistry 为可选依赖，缺失时回退目录名）。
     ...(workspaceTitleResolver === undefined ? {} : { resolveWorkspaceTitle: workspaceTitleResolver }),
     // 联网搜索请求的单次费用估算（issue #15）；缺省 0.02 元/次，配置可覆盖/关闭。

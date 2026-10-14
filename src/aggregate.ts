@@ -230,12 +230,20 @@ export interface AggregateOptions {
    * 官方判定都用别名后的路由名）。
    */
   routeAliases?: Readonly<Record<string, string>>
+  /** 折叠时模型 id → 目录键的用户自定义别名（与 pricing 模块注入的同源）：仅用于
+   *  折叠指纹——别名改动必须让历史行失效重折，否则 byModel 新旧 key 并存（issue #91 P2）。 */
+  modelKeyAliases?: Readonly<Record<string, string>>
   /** 每会话折叠缓存的上限（默认 {@link DEFAULT_MAX_CACHE_SESSIONS}）；
    *  超限时按最近使用先后淘汰最久未用的会话，防长期运行内存膨胀。 */
   maxCacheSessions?: number
   /** 中转站归组来源：返回当前 provider 路由视图（llm-pi-ai providers 的 baseURL）。
    *  每次聚合时调用取最新值；缺省时全部路由按「未知路由」处理（无配置发现）。 */
   resolveRoutes?: () => Readonly<Record<string, ProviderRouteView>>
+  /** 已注册 adapter 的 provider 集合（宿主 llm 注册表，llm-pi-ai 之外的插件路由，
+   *  issue #91）：每次聚合时调用取最新值。这些通道宿主只会把请求发给已注册的
+   *  adapter，身份可核实——合成无 baseURL 的路由视图归位 `direct:<provider>` 按
+   *  官方目录价计费，不再落「未知路由」记 0；缺省时保持 unknown 口径。 */
+  resolveRegisteredProviders?: () => ReadonlySet<string>
   /** 工作区标题解析：给定会话 cwd 返回项目显示标题；undefined = 回退到 cwd 末级目录名
    *  （host 的 workspaceRegistry 为可选依赖，缺失时不注入，行为保持不变）。 */
   resolveWorkspaceTitle?: (cwd: string) => string | undefined
@@ -968,7 +976,12 @@ export interface UsageLedgerDocument {
 // unknown 记 0）费用恒为 0、token 照常统计，复用旧行会让已发生的用量在升级后
 // 仍为 0；bump 让日志仍在的会话重折出费用，仅日志已删的行留在旧口径（账本
 // 「历史定格」语义的固有残留）。
-export const FOLD_VERSION = 21
+// 22：计价语义变更——通用化 21 的通道归位：宿主 llm 注册表里已注册 adapter 的
+// provider（llm-pi-ai 之外的任意插件路由，如 dsh-commandcode-provider 的
+// commandcode）不再依赖白名单，合成直连路由视图按官方目录价计价（issue #91）；
+// 同时模型别名（modelKeyAliases）进折叠指纹，别名改动后历史行按新目录键重算。
+// bump 让存量 unknown 行升级后重折补齐费用，仅日志已删的行留在旧口径。
+export const FOLD_VERSION = 22
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
@@ -1729,6 +1742,8 @@ export function configFingerprint(
   officialProviderIds: ReadonlySet<string> | undefined,
   routeAliases: Readonly<Record<string, string>>,
   searchEstimate: number,
+  modelKeyAliases: Readonly<Record<string, string>> = {},
+  registeredProviders: ReadonlySet<string> = new Set(),
 ): string {
   const subs = typeof subscriptionMatcher === 'function'
     ? 'fn'
@@ -1739,7 +1754,14 @@ export function configFingerprint(
   const aliases = Object.keys(routeAliases).sort()
     .map(key => `${key}=${routeAliases[key]}`)
     .join(',')
-  return [subs, officials, aliases, String(searchEstimate)].join('|')
+  // 模型别名影响折叠时的目录键归一：改动不进指纹会让 byModel 新旧 key 并存（issue #91 P2）。
+  const modelKeys = Object.keys(modelKeyAliases).sort()
+    .map(key => `${key}=${modelKeyAliases[key]}`)
+    .join(',')
+  // 已注册 adapter 集合决定插件注册通道的归位（issue #91 P1）：增删 provider 插件
+  // 后历史行按新通道口径重算。
+  const registered = [...registeredProviders].sort().join(',')
+  return [subs, officials, aliases, String(searchEstimate), modelKeys, registered].join('|')
 }
 
 /** 会话格式拒读（宿主 SessionFormatUnsupportedError）：日志完好，仅本构建读不了。
@@ -1770,7 +1792,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   const maxCacheSessions = options.maxCacheSessions ?? DEFAULT_MAX_CACHE_SESSIONS
   // 内存 cache 条目：fold 是 Map/Set 重表示；machine + lastSeq 是增量折叠游标
   // （issue #30），仅本进程内有效——ledger 恢复的行不带 machine，退回全量重折。
-  const cache = new Map<string, { stamp: string | null; fold: SessionFold; machine?: FoldMachine; lastSeq?: number }>()
+  const cache = new Map<string, { stamp: string | null; fold: SessionFold; machine?: FoldMachine; lastSeq?: number; fingerprint: string }>()
   // Durable rows stay JSON-safe in memory. The LRU above still bounds the
   // heavier Map/Set representation used for active-session incremental folds.
   const ledger = new Map<string, UsageLedgerSession>()
@@ -1788,12 +1810,28 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
   let ledgerAppliedMigrations: string[] | undefined
   let lastDoc: UsageStatsDocument | undefined
   let lastAt = 0
-  /** 每次聚合取最新的 provider 路由视图（中转站零配置发现）；缺省按空处理（全部未知路由）。 */
-  const routesOf = (): Readonly<Record<string, ProviderRouteView>> => options.resolveRoutes?.() ?? {}
+  /** 每次聚合取最新的 provider 路由视图（中转站零配置发现）；缺省按空处理（全部未知路由）。
+   *  叠加已注册 adapter 的通道（issue #91）：宿主 llm 注册表里的 provider 合成无 baseURL
+   *  的空路由视图——siteRefOf 的路由命中分支正是「无 origin 直连」的语义，归位
+   *  `direct:<provider>` 按官方目录价计费；llm-pi-ai 已有配置的路由优先（其 origin 可还原）。 */
+  const routesOf = (): Readonly<Record<string, ProviderRouteView>> => {
+    const routes: Record<string, ProviderRouteView> = { ...options.resolveRoutes?.() }
+    const registered = options.resolveRegisteredProviders?.()
+    if (registered !== undefined) {
+      for (const provider of registered) {
+        if (routes[provider] === undefined) routes[provider] = {}
+      }
+    }
+    return routes
+  }
   // 联网搜索请求的单次费用估算（issue #15）；0 = 关闭估算（调用仍计数，不计费）。
   const searchEstimate = options.searchCallEstimateCny ?? DEFAULT_SEARCH_CALL_ESTIMATE_CNY
-  // 配置指纹：进账本行的复用判定（配置变化 → 历史行失效重折，issue #37）。
-  const foldFingerprint = configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate)
+  // 配置指纹：进账本行的复用判定（配置变化 → 历史行失效重折，issue #37）。模型别名
+  // 与已注册 adapter 集合同属折叠语义（issue #91）：改动后历史行按新口径重算。
+  // 已注册集合随 provider 插件装卸变化，按聚合轮次求值——宿主 llm/adapters-updated
+  // 之后的第一轮聚合即按新通道口径重折，无需订阅事件。
+  const foldFingerprintOf = (): string => configFingerprint(subscriptionMatcher, officialProviderIds, routeAliases, searchEstimate, options.modelKeyAliases, options.resolveRegisteredProviders?.() ?? new Set())
+  let foldFingerprint = foldFingerprintOf()
   // 全量重折的分片大小：每片折叠后让出事件循环，超大会话不再连续阻塞宿主 RPC（issue #30）。
   const FOLD_CHUNK_EVENTS = 8000
 
@@ -1901,6 +1939,8 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       const now = Date.now()
 
       await ensureLedgerLoaded()
+      // 每轮刷新指纹：已注册 adapter 集合变化（provider 插件装卸）即触发历史行重折。
+      foldFingerprint = foldFingerprintOf()
 
       let metas: readonly SessionHeader[]
       try {
@@ -1966,7 +2006,10 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           // cache 行与账本行——账本门触发落穿后，若无这道门就会零读取复用旧折叠，
           // 空闲会话 stamp 永不变 → 整个进程生命周期 cost=0，只有重启才自愈。
           // cache 里是内存版 fold（unpricedModels 是 Set，没有 .some）。
+          // 配置指纹同门（issue #91）：已注册 adapter 集合/模型别名变化后，缓存的
+          // 旧口径折叠不能继续复用——落穿到下方按指纹失效全量重折。
           if (hit !== undefined && stamp !== null && hit.stamp === stamp
+            && hit.fingerprint === foldFingerprint
             && ![...hit.fold.unpricedModels].some(key => isPriced(key))) {
             // LRU touch：复用命中的会话移到缓存末尾，供上方上限清理优先淘汰最久未用。
             cache.delete(id)
@@ -1977,9 +2020,11 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           }
           const previous = cache.get(id)
           // 惰性失效同样作用于增量游标：价目表就绪后，此前因模型未收录而
-          // cost=0 的缓存行不能继续增量追加（旧事件永远补不出 cost）——
-          // 丢弃缓存退回全量重折，整条日志按当前价目表计价。
+          // cost=0 的缓存行不能继续增量追加（旧事件永远补不出 cost）；
+          // 配置指纹过期（注册表/别名变化）同理——旧段永远折不出新口径，
+          // 两种失效都直接跳过增量退回全量重折，整条日志按当前口径计价。
           if (previous?.machine !== undefined && previous.lastSeq !== undefined
+            && previous.fingerprint === foldFingerprint
             && ![...previous.fold.unpricedModels].some(key => isPriced(key))) {
             // seq 增量折叠（issue #30）：活跃会话持续追加使 mtime+size 键每轮失效，
             // 全量重读会让宿主事件循环连续阻塞十几秒、session/list 全部挂起。
@@ -2031,7 +2076,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
           }
           refreshTurns(fold, machine)
           const last = events[events.length - 1] as { seq?: number } | undefined
-          cache.set(id, { stamp, fold, machine, ...(last !== undefined && typeof last.seq === 'number' ? { lastSeq: last.seq } : {}) })
+          cache.set(id, { stamp, fold, machine, ...(last !== undefined && typeof last.seq === 'number' ? { lastSeq: last.seq } : {}), fingerprint: foldFingerprint })
           folds.push({ id, ...(cwd === undefined ? {} : { cwd }), fold })
           included.add(id)
           recordLedger(id, cwd, stamp, fold)

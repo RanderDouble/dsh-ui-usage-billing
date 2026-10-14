@@ -8,6 +8,15 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.4.31（2026-10-14）
+
+- 修复：**插件注册的 adapter 通道被判「未知路由」、费用恒 0**（issue #91，感谢 @shiinakaze 的完整定位报告）——CommandCode 等通道由独立插件经 `ctx.llm.registerAdapter` 注册、不经 llm-pi-ai 路由表（且 dsh-llm 注册是 all-or-nothing，补配进 llm-pi-ai 会 `DUPLICATE_ADAPTER` 启动失败），插件此前只认 llm-pi-ai 一个路由来源，这类通道全部落 unknown 记 0。现从宿主 llm 注册表（`ctx.llm.listProviders()`，软依赖，访问异常退化为空集）发现已注册通道，归位 `direct:<provider>` 按模型官方目录价计费；「未知路由」口径收窄为「宿主也不认识的通道」，#82 的记 0 姿态不变
+- 变更：**`modelKeyAliases` 进折叠指纹**（issue #91 P2）——此前别名改动不触发历史重算，byModel 新旧 key 并存；现别名变化（含增删）后历史行按新目录键重折
+- 变更：已注册 adapter 集合按聚合轮次求值并纳入指纹，cache 复用路径同步加指纹门——provider 插件装卸（`llm/adapters-updated`）后的第一轮聚合自动按新通道口径重折，无需重启
+- 账本：**FOLD_VERSION 21 → 22**——通道归位与别名指纹都是归账语义变更，存量 unknown 行升级后重折补齐费用
+- 测试：582 全绿（+4：插件通道归位计价、宿主未知通道隔离、注册表变化按轮重折、别名指纹重折）
+- 构建：lib/client.js 252,657 字节 ≤ 256 KiB（262,144 字节）单文件上限，余量 9,487 字节
+
 ### v1.4.30（2026-10-14）
 
 - 修复：**v1.4.29 发布产物缺 #91 别名**——构建漏了 `tsc -b` 步骤（tsdown 的入口是 lib/types 的 tsc 产物，单跑 tsdown 会静默打包旧产物），v1.4.29 的 bundle 不含本次改动；已在 npm 标记 deprecated，请直接用本版本。修复内容与 v1.4.29 相同：**中转站厂商前缀 id `deepseek/deepseek-v4.1-flash` 落「未收录」**（issue #91，感谢 @shiinakaze）——CommandCode 等 OpenRouter 式中转不改写上游 id、只加 `deepseek/` 命名空间前缀，canon 归一去分隔符后无法命中既有键；现补显式别名：`deepseek/deepseek-v4.1-flash` / `deepseek/deepseek-flash` → `flash`、`deepseek/deepseek-v4-pro` → `pro`，按官方目录价计费

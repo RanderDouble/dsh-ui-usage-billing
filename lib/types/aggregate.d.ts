@@ -140,12 +140,20 @@ export interface AggregateOptions {
      * 官方判定都用别名后的路由名）。
      */
     routeAliases?: Readonly<Record<string, string>>;
+    /** 折叠时模型 id → 目录键的用户自定义别名（与 pricing 模块注入的同源）：仅用于
+     *  折叠指纹——别名改动必须让历史行失效重折，否则 byModel 新旧 key 并存（issue #91 P2）。 */
+    modelKeyAliases?: Readonly<Record<string, string>>;
     /** 每会话折叠缓存的上限（默认 {@link DEFAULT_MAX_CACHE_SESSIONS}）；
      *  超限时按最近使用先后淘汰最久未用的会话，防长期运行内存膨胀。 */
     maxCacheSessions?: number;
     /** 中转站归组来源：返回当前 provider 路由视图（llm-pi-ai providers 的 baseURL）。
      *  每次聚合时调用取最新值；缺省时全部路由按「未知路由」处理（无配置发现）。 */
     resolveRoutes?: () => Readonly<Record<string, ProviderRouteView>>;
+    /** 已注册 adapter 的 provider 集合（宿主 llm 注册表，llm-pi-ai 之外的插件路由，
+     *  issue #91）：每次聚合时调用取最新值。这些通道宿主只会把请求发给已注册的
+     *  adapter，身份可核实——合成无 baseURL 的路由视图归位 `direct:<provider>` 按
+     *  官方目录价计费，不再落「未知路由」记 0；缺省时保持 unknown 口径。 */
+    resolveRegisteredProviders?: () => ReadonlySet<string>;
     /** 工作区标题解析：给定会话 cwd 返回项目显示标题；undefined = 回退到 cwd 末级目录名
      *  （host 的 workspaceRegistry 为可选依赖，缺失时不注入，行为保持不变）。 */
     resolveWorkspaceTitle?: (cwd: string) => string | undefined;
@@ -591,7 +599,7 @@ export interface UsageLedgerDocument {
  * 会话费用只剩最近一段，issue #29）。
  * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
  */
-export declare const FOLD_VERSION = 21;
+export declare const FOLD_VERSION = 22;
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
  * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并
@@ -687,7 +695,7 @@ export interface SessionUsageSummary {
  * 订阅豁免），历史账本行立即失效并全量重折，配置变更即时生效（issue #37）。
  * 判定函数无法序列化，统一记为 `fn`（任何函数形态互视为同一指纹）。
  */
-export declare function configFingerprint(subscriptionMatcher: SubscriptionMatcher, officialProviderIds: ReadonlySet<string> | undefined, routeAliases: Readonly<Record<string, string>>, searchEstimate: number): string;
+export declare function configFingerprint(subscriptionMatcher: SubscriptionMatcher, officialProviderIds: ReadonlySet<string> | undefined, routeAliases: Readonly<Record<string, string>>, searchEstimate: number, modelKeyAliases?: Readonly<Record<string, string>>, registeredProviders?: ReadonlySet<string>): string;
 /**
  * Create the incremental usage aggregator.
  * @param persistence - the session persistence service.
