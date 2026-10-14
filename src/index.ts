@@ -42,6 +42,7 @@ import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from './builtin-cata
 import { queryBalances, queryCustomBalances } from './balance.ts'
 import { queryDeclaredEndpoints } from './declarative.ts'
 import { reconcileBalanceDelta, type BalanceRef, type ReconcileEvent } from './reconcile.ts'
+import { emptyActualLedger, foldActualSample, actualRowsOf, type ActualLedger } from './actual.ts'
 import { fetchLivePricing } from './pricing-fetch.ts'
 import type { CustomBalanceConfig, DeclaredEndpointConfig, LivePricing, RelayQuota, SubscriptionPlanConfig, SubscriptionQuota } from './pricing-shared.ts'
 import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseOpenCodeAuthDocument, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
@@ -269,6 +270,12 @@ export interface UsageBillingConfig {
    * 如 `{ "hy4-preview": "hunyuan" }`）。聚合折叠与客户端渲染共用同一映射。
    */
   modelKeyAliases?: Record<string, string>
+  /** 实际消耗采样间隔（毫秒）；默认 10 分钟。 */
+  actualSampleIntervalMs?: number
+  /** 实际消耗账本（余额采样序列）的持久化路径；默认 `<harness home>/.dsh-usage-actual.json`。 */
+  actualLedgerPath?: string
+  /** 界面模型映射（POST /api/billing/aliases 写入）的持久化路径；默认 `<harness home>/.dsh-usage-aliases.json`。 */
+  aliasesPath?: string
 }
 
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
@@ -277,6 +284,9 @@ const PRICING_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000
 /** 历史回放预热的延迟：等宿主启动高峰（插件加载 / 路由挂载）过去再全量折叠，
  *  避免抢启动期的 CPU；纯延迟不阻塞任何请求，面板提前打开也只会提前聚合。 */
 const WARMUP_DELAY_MS = 3_000
+
+/** 实际消耗余额采样的默认间隔（毫秒）：10 分钟一次，MAX_SAMPLES=2000 覆盖约 13 天。 */
+const DEFAULT_ACTUAL_SAMPLE_INTERVAL_MS = 10 * 60 * 1000
 
 /** 订阅套餐额度缓存时长（毫秒）：上游配额 API 低频变化，5 分钟足够。 */
 const SUBSCRIPTION_CACHE_MS = 5 * 60 * 1000
@@ -747,6 +757,26 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       .catch(() => { /* 基准写失败不影响余额查询主流程 */ })
   }
 
+  // 实际消耗账本：各来源余额定时采样的持久化（与理论消耗账本完全独立）。
+  // 账本损坏时视为首次，重新打基准；写失败不影响采样主流程。
+  const actualLedgerPath = config.actualLedgerPath ?? join(dshHome, '.dsh-usage-actual.json')
+  let actualLedger: ActualLedger = emptyActualLedger()
+  void (async () => {
+    try {
+      const doc = JSON.parse(await readFile(actualLedgerPath, 'utf8')) as { version?: unknown; providers?: unknown }
+      if (doc.version === 1 && doc.providers !== null && typeof doc.providers === 'object') {
+        actualLedger = doc as unknown as ActualLedger
+      }
+    } catch {
+      // 账本缺失/损坏：从空账本开始（余额采样会重新积累）。
+    }
+  })()
+  const persistActualLedger = (): void => {
+    const payload = JSON.stringify(actualLedger)
+    void writeFileAtomic(actualLedgerPath, payload, { mode: 0o600, dirMode: 0o700 })
+      .catch(() => { /* 账本写失败不影响采样主流程；下次采样再写 */ })
+  }
+
   // 常驻增量聚合器：按会话缓存折叠结果（日志 mtime+size 失效），
   // 前端 30 秒轮询只重算写过的会话。
   // 项目归属用工作区标题（host workspaceRegistry 可选；缺失时 resolver 为 undefined，回退目录名）。
@@ -764,6 +794,39 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       return new Set()
     }
   }
+  // 模型别名的可变容器：config 与界面映射文件（.dsh-usage-aliases.json）合并后写入。
+  // 本对象直接作为 options.modelKeyAliases 传入聚合器，foldFingerprintOf 每轮聚合
+  // 读取其键值——原位清空再重填即可在下一轮触发历史行按新目录键重折。
+  const aggregatorAliases: Record<string, string> = {}
+  // 界面映射文件（POST /api/billing/aliases 写入）；与 config.modelKeyAliases 合并，
+  // 界面条目优先（界面编辑是用户最新意图）。
+  const aliasesUiPath = config.aliasesPath ?? join(dshHome, '.dsh-usage-aliases.json')
+  let uiAliases: Record<string, string> = {}
+  const refreshAggregatorAliases = (): void => {
+    for (const key of Object.keys(aggregatorAliases)) delete aggregatorAliases[key]
+    Object.assign(aggregatorAliases, config.modelKeyAliases, uiAliases)
+    applyUserModelAliases(Object.keys(aggregatorAliases).length === 0 ? undefined : aggregatorAliases)
+  }
+  void (async () => {
+    try {
+      const doc = JSON.parse(await readFile(aliasesUiPath, 'utf8')) as { aliases?: unknown }
+      if (doc.aliases !== null && typeof doc.aliases === 'object') {
+        const merged: Record<string, string> = {}
+        for (const [key, value] of Object.entries(doc.aliases as Record<string, unknown>)) {
+          if (typeof value === 'string' && value.length > 0) merged[key] = value
+        }
+        uiAliases = merged
+        refreshAggregatorAliases()
+      }
+    } catch {
+      // 映射文件缺失/损坏：只用 config 别名。
+    }
+  })()
+  const persistUiAliases = (): void => {
+    const payload = JSON.stringify({ version: 1, aliases: uiAliases })
+    void writeFileAtomic(aliasesUiPath, payload, { mode: 0o600, dirMode: 0o700 })
+      .catch(() => { /* 映射写失败不影响聚合主流程 */ })
+  }
   const aggregator = createUsageAggregator(adaptSessionPersistence(ctx.sessionPersistence), {
     ...(config.subscriptionProviders === undefined
       ? {}
@@ -775,7 +838,8 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     // 插件注册的 adapter 通道（llm-pi-ai 之外）按直连归位计价（issue #91）。
     resolveRegisteredProviders: registeredProvidersOf,
     // 用户模型别名进折叠指纹：别名改动让历史行按新目录键重折（issue #91 P2）。
-    ...(config.modelKeyAliases === undefined ? {} : { modelKeyAliases: config.modelKeyAliases }),
+    // 传可变容器本体：界面映射 POST 后原位重填键值，下一轮聚合即重折。
+    modelKeyAliases: aggregatorAliases,
     // 项目归属用工作区标题命名（host workspaceRegistry 为可选依赖，缺失时回退目录名）。
     ...(workspaceTitleResolver === undefined ? {} : { resolveWorkspaceTitle: workspaceTitleResolver }),
     // 联网搜索请求的单次费用估算（issue #15）；缺省 0.02 元/次，配置可覆盖/关闭。
@@ -1234,6 +1298,128 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       },
     }),
     'usage-billing: balance route',
+  )
+
+  // 实际消耗采样：定时查询全部余额来源（内置 + custom + declared），把每行成功
+  // 余额折进采样账本（actual.ts：余额下降记消耗、充值/赠送上升记 reset）。
+  // 与 balance 路由的查询三件套同源，独立计时，不依赖面板是否打开。
+  const sampleActualBalances = async (): Promise<void> => {
+    const piProviders = await readPiAiProviders(ctx.settings)
+    const providers = { ...piProviders }
+    const deepseekKey = providers['deepseek']?.apiKeyEnv
+    if (deepseekKey === undefined || deepseekKey === '') {
+      providers['deepseek'] = { ...providers['deepseek'], apiKeyEnv: config.balanceApiKeyEnv ?? DEFAULT_BALANCE_API_KEY_ENV }
+    }
+    const rows = [
+      ...await queryBalances(ctx, providers),
+      ...await queryCustomBalances(ctx, config.customBalances ?? []),
+      ...await queryDeclaredEndpoints(ctx, piProviders, config.declaredEndpoints ?? []),
+    ]
+    const now = Date.now()
+    let changed = false
+    for (const row of rows) {
+      if (foldActualSample(actualLedger, row, now)) changed = true
+    }
+    if (changed) persistActualLedger()
+  }
+  ctx.effect(
+    () => {
+      const timer = setInterval(() => { void sampleActualBalances() }, config.actualSampleIntervalMs ?? DEFAULT_ACTUAL_SAMPLE_INTERVAL_MS)
+      return () => { clearInterval(timer) }
+    },
+    'usage-billing: actual balance sampling timer',
+  )
+
+  // 实际消耗查询：从采样账本汇总各来源的今日/本月/累计实际支出。
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/billing/actual',
+      handler: async (req, res) => {
+        if (!guardLoopback(req, res, trustedHosts)) return
+        if (req.method !== 'GET') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'method not allowed' }))
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        const now = Date.now()
+        res.end(JSON.stringify({ providers: actualRowsOf(actualLedger, dayStamp(now), dayStamp(now).slice(0, 7), now) }))
+      },
+    }),
+    'usage-billing: actual route',
+  )
+
+  // 模型映射（界面入口）：GET 读当前合并映射（config + 界面文件，界面优先）；
+  // POST 整体替换界面映射并触发聚合重折。写操作按回环写防护模板校验。
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/billing/aliases',
+      handler: async (req, res) => {
+        if (!guardLoopback(req, res, trustedHosts)) return
+        if (req.method !== 'GET' && req.method !== 'POST') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'method not allowed' }))
+          return
+        }
+        if (req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ aliases: { ...config.modelKeyAliases, ...uiAliases } }))
+          return
+        }
+        if (!isLoopbackOrigin(req.headers.origin)) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
+          return
+        }
+        if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'unsupported content-type' }))
+          return
+        }
+        let raw = ''
+        for await (const chunk of req) {
+          raw += chunk
+          if (raw.length > 16_384) {
+            res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'payload too large' }))
+            req.destroy()
+            return
+          }
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(raw)
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'invalid json' }))
+          return
+        }
+        const aliases = (parsed as { aliases?: unknown }).aliases
+        if (aliases === null || typeof aliases !== 'object' || Array.isArray(aliases)) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'aliases must be an object' }))
+          return
+        }
+        const next: Record<string, string> = {}
+        for (const [key, value] of Object.entries(aliases as Record<string, unknown>)) {
+          if (typeof value !== 'string' || value.length === 0) {
+            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: `alias value must be a non-empty string: ${key}` }))
+            return
+          }
+          next[key] = value
+        }
+        uiAliases = next
+        refreshAggregatorAliases()
+        persistUiAliases()
+        void aggregator.aggregate().catch(() => { /* 重折失败等下一轮聚合重试 */ })
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ aliases: { ...config.modelKeyAliases, ...uiAliases } }))
+      },
+    }),
+    'usage-billing: aliases route',
   )
 
   // usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。

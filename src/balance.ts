@@ -556,11 +556,14 @@ export async function queryCustomBalances(
         const remaining = evalExtract(config.extract.remaining, await response.json())
         // 提取规则未命中任何字段：配置的 path 写错或上游改版，标记 invalid 而非网络问题。
         if (remaining === undefined) return { provider, displayName, error: 'invalid' }
+        // 积分制（creditUnitPrice）：端点返回积分个数，乘单价折算成人民币余额，
+        // 差值账本据此直接记录折算金额的实际消耗。
+        const balance = config.creditUnitPrice === undefined ? remaining : remaining * config.creditUnitPrice
         return {
           provider,
           displayName,
-          currency: config.unit ?? 'CNY',
-          totalBalance: remaining,
+          currency: config.creditUnitPrice === undefined ? config.unit ?? 'CNY' : 'CNY',
+          totalBalance: balance,
         }
       } finally {
         clearTimeout(timer)
