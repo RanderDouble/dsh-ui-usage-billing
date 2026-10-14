@@ -1,6 +1,6 @@
 {
-  "name": "@kenz1117/dsh-ui-usage-billing",
-  "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs.",
+  "name": "@randerdouble/dsh-ui-usage-billing",
+  "description": "Usage billing dashboard for DeepSeek Harness: sidebar cost metrics plus a full dashboard modal, priced from a current multi-provider catalog with real usage aggregated from session logs, with a separate actual-spend ledger from balance sampling.",
   "version": "1.4.31",
   "keywords": [
     "deepseek-harness",
@@ -19,7 +19,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kenz1117/dsh-ui-usage-billing.git"
+    "url": "git+https://github.com/RanderDouble/dsh-ui-usage-billing.git"
   },
   "type": "module",
   "main": "lib/index.js",

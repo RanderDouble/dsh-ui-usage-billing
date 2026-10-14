@@ -187,7 +187,7 @@ async function loadCompositionWith(options: {
     `- name: 'virtual:test-billing-settings${options.settings === 'live' ? '-live' : ''}'`,
     // 显式 id 与 name 必须是同一个列表项（name 用 2 空格缩进续行），拆成两行
     // 会生成一个无 name 的空条目导致 import 失败。
-    ...(options.entryId === undefined ? ["- name: '@kenz1117/dsh-ui-usage-billing'"] : ["- id: 'usage-billing-test'", "  name: '@kenz1117/dsh-ui-usage-billing'"]),
+    ...(options.entryId === undefined ? ["- name: '@randerdouble/dsh-ui-usage-billing'"] : ["- id: 'usage-billing-test'", "  name: '@randerdouble/dsh-ui-usage-billing'"]),
     '  config:',
     '    monthlyBudget: 100',
     // 追加的 config 行统一补 4 空格缩进，调用方只写裸字段行。
@@ -216,7 +216,7 @@ async function loadCompositionWith(options: {
     ...(options.settings === 'live'
       ? [['virtual:test-billing-settings-live', liveSettingsDouble(options.onUpdate ?? (() => {}))] as const]
       : [['virtual:test-billing-settings', settingsDouble] as const]),
-    ['@kenz1117/dsh-ui-usage-billing', UsageBilling],
+    ['@randerdouble/dsh-ui-usage-billing', UsageBilling],
   ])
   context.loader.internal = {
     version: 'v2',
@@ -351,7 +351,7 @@ describe('usage-billing real Loader composition', () => {
 
     // HMR 安全：卸载 billing 行后三条路由释放（webserver 仍在，答 404）。
     const billingEntry = [...loaded.loader.entries()]
-      .find(entry => entry.options.name === '@kenz1117/dsh-ui-usage-billing')
+      .find(entry => entry.options.name === '@randerdouble/dsh-ui-usage-billing')
     expect(billingEntry).toBeDefined()
     await billingEntry!.fiber?.dispose()
     expect((await getJson(port, '/api/billing/usage-stats')).status).toBe(404)
@@ -376,7 +376,7 @@ describe('usage-billing real Loader composition', () => {
 
     // disposal 后 actual 路由一并释放；账本文件路径由 config 注入（不落真实家目录）。
     const billingEntry = [...loaded.loader.entries()]
-      .find(entry => entry.options.name === '@kenz1117/dsh-ui-usage-billing')
+      .find(entry => entry.options.name === '@randerdouble/dsh-ui-usage-billing')
     expect(billingEntry).toBeDefined()
     await billingEntry!.fiber?.dispose()
     expect((await getJson(port, '/api/billing/actual')).status).toBe(404)

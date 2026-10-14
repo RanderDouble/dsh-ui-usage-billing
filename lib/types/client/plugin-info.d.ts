@@ -4,7 +4,7 @@
  * 这样发布版版本与源码单一来源，不会两处不同步。
  */
 /** npm 包名。 */
-export declare const PLUGIN_NAME = "@kenz1117/dsh-ui-usage-billing";
+export declare const PLUGIN_NAME = "@randerdouble/dsh-ui-usage-billing";
 /** 一句话描述。 */
 export declare const PLUGIN_DESCRIPTION = "Usage billing dashboard for DeepSeek Harness";
 /** 作者显示名。 */
@@ -12,9 +12,9 @@ export declare const PLUGIN_AUTHOR_NAME = "KenZ";
 /** 作者 GitHub 账号（仓库/作者页链接）。 */
 export declare const PLUGIN_AUTHOR_HANDLE = "kenz1117";
 /** 源码仓库（可点击）。 */
-export declare const PLUGIN_REPOSITORY = "https://github.com/kenz1117/dsh-ui-usage-billing";
+export declare const PLUGIN_REPOSITORY = "https://github.com/RanderDouble/dsh-ui-usage-billing";
 /** npm 包主页（可点击）。 */
-export declare const PLUGIN_NPM_URL = "https://www.npmjs.com/package/@kenz1117/dsh-ui-usage-billing";
+export declare const PLUGIN_NPM_URL = "https://www.npmjs.com/package/@randerdouble/dsh-ui-usage-billing";
 /** 许可证。 */
 export declare const PLUGIN_LICENSE = "MIT";
 //# sourceMappingURL=plugin-info.d.ts.map

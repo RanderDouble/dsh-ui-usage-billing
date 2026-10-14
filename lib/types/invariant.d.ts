@@ -1,4 +1,4 @@
-/** Package invariant companion for `@kenz1117/dsh-ui-usage-billing`. */
+/** Package invariant companion for `@randerdouble/dsh-ui-usage-billing`. */
 import type { Context } from '@deepseek-ai/cordis';
 export declare const name = "usage-billing-invariant";
 export declare const inject: string[];

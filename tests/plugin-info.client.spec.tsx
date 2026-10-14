@@ -16,13 +16,13 @@ describe('PluginInfoCard', () => {
     render(<PluginInfoCard t={t} version="0.9.4" />)
     expect(screen.getByTestId('billing-plugin-info')).toBeTruthy()
     // 包名在「插件名」与「npm」两行各出现一次。
-    expect(screen.getAllByText('@kenz1117/dsh-ui-usage-billing').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText('@randerdouble/dsh-ui-usage-billing').length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('v0.9.4')).toBeTruthy()
     expect(screen.getByText(/KenZ \(kenz1117\)/)).toBeTruthy()
     // 仓库行：链接文本「GitHub」，href 指向仓库主页。
     const repoLink = screen.getByRole('link', { name: 'GitHub' })
     expect(repoLink).toBeTruthy()
-    expect(repoLink.getAttribute('href')).toBe('https://github.com/kenz1117/dsh-ui-usage-billing')
+    expect(repoLink.getAttribute('href')).toBe('https://github.com/RanderDouble/dsh-ui-usage-billing')
     expect(screen.getByText('MIT')).toBeTruthy()
   })
 

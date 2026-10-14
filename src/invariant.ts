@@ -1,9 +1,9 @@
-/** Package invariant companion for `@kenz1117/dsh-ui-usage-billing`. */
+/** Package invariant companion for `@randerdouble/dsh-ui-usage-billing`. */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = '@kenz1117/dsh-ui-usage-billing'
+const PACKAGE_NAME = '@randerdouble/dsh-ui-usage-billing'
 
 export const name = 'usage-billing-invariant'
 export const inject = ['invariants']
