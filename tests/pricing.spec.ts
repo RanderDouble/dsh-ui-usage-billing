@@ -775,6 +775,14 @@ describe('catalog additions for 2026-10 sweep (Haiku 5.5, Mythos 5.1)', () => {
     expect(resolveCatalogKey('claude-mythos-5-1')).toBe('claude-fable-5-1')
     expect(resolveCatalogKey('claude-mythos-5.1')).toBe('claude-fable-5-1')
   })
+
+  it('homes relay vendor-prefixed deepseek ids to the official keys (issue #91)', () => {
+    // CommandCode 等 OpenRouter 式中转不改写上游 id、只加 `deepseek/` 命名空间
+    // 前缀——canon 去分隔符后无法命中既有键，需显式别名归一。
+    expect(resolveCatalogKey('deepseek/deepseek-v4.1-flash')).toBe('flash')
+    expect(resolveCatalogKey('deepseek/deepseek-flash')).toBe('flash')
+    expect(resolveCatalogKey('deepseek/deepseek-v4-pro')).toBe('pro')
+  })
 })
 
 describe('Qwen3.8 Max list price with extra pricing rows', () => {

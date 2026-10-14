@@ -8,6 +8,12 @@
 
 > **版本序列说明**：自 v1.2.0 起预览线序列恒高于稳定线 1.1.x——消除此前 1.0.x < 1.1.x 的版本号倒挂（pnpm `minimumReleaseAge` 冷静期会把刚发布的 latest 跳过、回退到旧稳定线，issue #40 有实测案例）。安装建议钉具体版本号。
 
+### v1.4.29（2026-10-14）
+
+- 修复：**中转站厂商前缀 id `deepseek/deepseek-v4.1-flash` 落「未收录」**（issue #91，感谢 @shiinakaze）——CommandCode 等 OpenRouter 式中转不改写上游 id、只加 `deepseek/` 命名空间前缀，canon 归一去分隔符后无法命中既有键；现补显式别名：`deepseek/deepseek-v4.1-flash` / `deepseek/deepseek-flash` → `flash`、`deepseek/deepseek-v4-pro` → `pro`，按官方目录价计费
+- 账本：**FOLD_VERSION 不 bump**——v1.4.28 的惰性失效（行内 `unpricedModels ∩ 现价目表` 非空即重折）已覆盖目录类补充：旧行把该 id 记在 unpricedModels，新别名注入后自动重折，无需全量重折
+- 构建：lib/client.js 252,657 字节 ≤ 256 KiB（262,144 字节）单文件上限，余量 9,487 字节
+
 ### v1.4.28（2026-10-13）
 
 - 修复：**workbuddy adapter 通道费用恒为 0**（issue #90，感谢 @JinruiWang）——`dsh-workbuddy-connect` 经 `llm.registerAdapter` 注册 provider、不进 llm-pi-ai 路由表，`siteRefOf()` 查询 miss 后落 unknown 桶（#82 口径强制记 0）。现增已知第三方 adapter 通道名单（`workbuddy` / `workbuddy-ai`，大小写不敏感），命中即归位 `direct:<provider>` 按官方目录价计价；名单不接入官方口径（`officialCalls`/`officialCost` 保持 0），名单外配置外 provider 仍落 unknown 记 0；客户端 `direct:workbuddy` 渲染为「直连 · WorkBuddy」

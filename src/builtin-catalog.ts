@@ -1059,6 +1059,11 @@ export const BUILTIN_MODEL_KEY_ALIASES: Readonly<Record<string, string>> = {
   // 官方价目页 09-10 更新后的新规范名 deepseek-flash（模型版本 V4.1-Flash，
   // 含图像理解——vision 并入 flash 主线）：计费同 flash 时间线。
   'deepseek-flash': 'flash',
+  // 中转站厂商前缀形态（CommandCode 等 OpenRouter 式 `deepseek/<id>` 命名，
+  // issue #91）：上游 id 不改写，仅加命名空间前缀，归一到既有键按官方价计。
+  'deepseek/deepseek-v4.1-flash': 'flash',
+  'deepseek/deepseek-flash': 'flash',
+  'deepseek/deepseek-v4-pro': 'pro',
   'deepseek-v4-pro': 'pro',
   'glm-5.2': 'glm',
   // 智谱 GLM 其余按量变体：独立目录键（点/横杠/大小写变体归一）。
