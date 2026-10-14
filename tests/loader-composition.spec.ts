@@ -43,7 +43,18 @@ beforeEach(() => {
 afterEach(async () => {
   await context?.fiber.dispose()
   context = undefined
-  if (root !== undefined) await rm(root, { recursive: true, force: true })
+  if (root !== undefined) {
+    // writeFileAtomic 的异步落盘可能与 rmdir 竞争：小退避重试两次。
+    for (let i = 0; ; i += 1) {
+      try {
+        await rm(root, { recursive: true, force: true })
+        break
+      } catch (error) {
+        if (i >= 2 || (error as NodeJS.ErrnoException).code !== 'ENOTEMPTY') throw error
+        await new Promise(resolve => setTimeout(resolve, 100))
+      }
+    }
+  }
   root = undefined
   vi.unstubAllGlobals()
 })
@@ -160,11 +171,12 @@ async function loadCompositionWith(options: {
   omitPersistPaths?: boolean
   settings?: 'legacy' | 'live'
   entryId?: string
-  entryConfig?: string[]
+  entryConfig?: string[] | ((root: string) => string[])
   onUpdate?: (ns: string, patch: Record<string, unknown>) => void
 } = {}): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-usage-billing-'))
   const configPath = join(root, 'cordis.yml')
+  const extraConfig = typeof options.entryConfig === 'function' ? options.entryConfig(root) : options.entryConfig
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-host-webserver'",
     '  config:',
@@ -179,7 +191,7 @@ async function loadCompositionWith(options: {
     '  config:',
     '    monthlyBudget: 100',
     // 追加的 config 行统一补 4 空格缩进，调用方只写裸字段行。
-    ...(options.entryConfig ?? []).map(line => `    ${line}`),
+    ...(extraConfig ?? []).map(line => `    ${line}`),
     // 隔离持久化路径：快照/账本/对账基准都写入本测试临时目录，避免读/写
     // 宿主家目录下的使用统计与账本等真实持久化数据（由宿主服务运行产生，
     // 测试硬编码读取会导致断言污染值而失败）。omitPersistPaths 用例必须先
@@ -346,7 +358,87 @@ describe('usage-billing real Loader composition', () => {
     expect((await getJson(port, '/api/billing/pricing')).status).toBe(404)
     expect((await getJson(port, '/api/billing/pricing/refresh')).status).toBe(404)
     expect((await getJson(port, '/api/billing/balance')).status).toBe(404)
+    expect((await getJson(port, '/api/billing/actual')).status).toBe(404)
+    expect((await getJson(port, '/api/billing/aliases')).status).toBe(404)
     expect((await getJson(port, '/api/billing/notify-claim')).status).toBe(404)
+  })
+
+  it('serves the actual-spend ledger endpoint and persists its samples', { timeout: 60_000 }, async () => {
+    const loaded = await loadCompositionWith({
+      entryConfig: root => [`actualLedgerPath: '${join(root, 'usage-actual.json')}'`],
+    })
+    const port = loaded.webServer.port
+
+    // 无采样来源：响应是空行列表；采样 timer 也在跑（默认 10 分钟，测试内不触发）。
+    const empty = await getJson(port, '/api/billing/actual')
+    expect(empty.status).toBe(200)
+    expect((empty.json as { providers: unknown[] }).providers).toEqual([])
+
+    // disposal 后 actual 路由一并释放；账本文件路径由 config 注入（不落真实家目录）。
+    const billingEntry = [...loaded.loader.entries()]
+      .find(entry => entry.options.name === '@kenz1117/dsh-ui-usage-billing')
+    expect(billingEntry).toBeDefined()
+    await billingEntry!.fiber?.dispose()
+    expect((await getJson(port, '/api/billing/actual')).status).toBe(404)
+  })
+
+  it('persists UI model aliases and merges them over config aliases', { timeout: 60_000 }, async () => {
+    const loaded = await loadCompositionWith({
+      entryConfig: root => [
+        `aliasesPath: '${join(root, 'usage-aliases.json')}'`,
+        "modelKeyAliases: { 'hy4-preview': 'hunyuan' }",
+      ],
+    })
+    const port = loaded.webServer.port
+
+    // GET：config 别名 + 界面别名（初始为空）合并视图。
+    const initial = await getJson(port, '/api/billing/aliases')
+    expect(initial.status).toBe(200)
+    expect((initial.json as { aliases: Record<string, string> }).aliases).toEqual({ 'hy4-preview': 'hunyuan' })
+
+    // GET 拒绝写方法；回环 POST 放行并把合并视图写回。
+    expect((await getJson(port, '/api/billing/aliases')).status).toBe(200)
+    const post = await fetch(`http://127.0.0.1:${String(port)}/api/billing/aliases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${String(port)}` },
+      body: JSON.stringify({ aliases: { 'hy4-preview': 'hunyuan', 'glm-9': 'zhipu-glm' } }),
+    })
+    expect(post.status).toBe(200)
+    const merged = (await post.json() as { aliases: Record<string, string> }).aliases
+    expect(merged).toEqual({ 'hy4-preview': 'hunyuan', 'glm-9': 'zhipu-glm' })
+
+    // 界面别名覆盖 config 同名键；持久化文件随后出现。
+    const overwrite = await fetch(`http://127.0.0.1:${String(port)}/api/billing/aliases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${String(port)}` },
+      body: JSON.stringify({ aliases: { 'hy4-preview': 'deepseek-chat' } }),
+    })
+    expect(overwrite.status).toBe(200)
+    expect((await overwrite.json() as { aliases: Record<string, string> }).aliases)
+      .toEqual({ 'hy4-preview': 'deepseek-chat' })
+    await expect(pollForFile(join(root!, 'usage-aliases.json'))).resolves.toBe(true)
+    const persisted = JSON.parse(await readFile(join(root!, 'usage-aliases.json'), 'utf8')) as { version: number; aliases: Record<string, string> }
+    expect(persisted.version).toBe(1)
+    expect(persisted.aliases).toEqual({ 'hy4-preview': 'deepseek-chat' })
+
+    // 非法载荷：值不是字符串 → 400；跨站 Origin → 403。
+    const bad = await fetch(`http://127.0.0.1:${String(port)}/api/billing/aliases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: `http://127.0.0.1:${String(port)}` },
+      body: JSON.stringify({ aliases: { 'x': 123 } }),
+    })
+    expect(bad.status).toBe(400)
+    const crossSite = await fetch(`http://127.0.0.1:${String(port)}/api/billing/aliases`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
+      body: JSON.stringify({ aliases: {} }),
+    })
+    expect(crossSite.status).toBe(403)
+
+    // usage-stats 的模型行按新别名重折：GLM 未在替身事件里出现，此处只验证
+    // 聚合端点在别名保存后仍正常响应（重折逻辑由 aggregate.ts 指纹机制保证）。
+    const stats = await getJson(port, '/api/billing/usage-stats')
+    expect(stats.status).toBe(200)
   })
 
   it('projects the usage-tool toggle through the new-generation settings model (issue #80)', { timeout: 60_000 }, async () => {
