@@ -129,6 +129,8 @@ export interface UsageBillingConfig {
     actualLedgerPath?: string;
     /** 界面模型映射（POST /api/billing/aliases 写入）的持久化路径；默认 `<harness home>/.dsh-usage-aliases.json`。 */
     aliasesPath?: string;
+    /** 界面渠道种类覆盖（POST /api/billing/channels 写入）的持久化路径；默认 `<harness home>/.dsh-usage-channels.json`。 */
+    channelsPath?: string;
 }
 /**
  * Create the atomic file-backed durable-ledger store. The previous complete file

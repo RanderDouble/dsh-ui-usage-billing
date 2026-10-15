@@ -44,7 +44,7 @@ import { queryDeclaredEndpoints } from './declarative.ts'
 import { reconcileBalanceDelta, type BalanceRef, type ReconcileEvent } from './reconcile.ts'
 import { emptyActualLedger, foldActualSample, actualRowsOf, type ActualLedger } from './actual.ts'
 import { fetchLivePricing } from './pricing-fetch.ts'
-import type { CustomBalanceConfig, DeclaredEndpointConfig, LivePricing, RelayQuota, SubscriptionPlanConfig, SubscriptionQuota } from './pricing-shared.ts'
+import type { ChannelKindOverride, CustomBalanceConfig, DeclaredEndpointConfig, LivePricing, RelayQuota, SubscriptionPlanConfig, SubscriptionQuota } from './pricing-shared.ts'
 import { collectSubscriptions, EMPTY_SUBSCRIPTION_KEYS, identifySubscriptionPlans, parseOpenCodeAuthDocument, type IdentifiedSubscriptionPlan, type SubscriptionKeys } from './subscriptions.ts'
 import { isOfficialBaseUrl, queryRelayQuotas, type RelayRoute } from './relay.ts'
 import { planTypeOf, subscriptionFeeCnyOf } from './client/plan-knowledge.ts'
@@ -276,6 +276,8 @@ export interface UsageBillingConfig {
   actualLedgerPath?: string
   /** 界面模型映射（POST /api/billing/aliases 写入）的持久化路径；默认 `<harness home>/.dsh-usage-aliases.json`。 */
   aliasesPath?: string
+  /** 界面渠道种类覆盖（POST /api/billing/channels 写入）的持久化路径；默认 `<harness home>/.dsh-usage-channels.json`。 */
+  channelsPath?: string
 }
 
 /** 实时定价的后台刷新间隔（毫秒）：汇率/模型价低频变化，6 小时一次足够。 */
@@ -825,6 +827,32 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
     const payload = JSON.stringify({ version: 1, aliases: uiAliases })
     void writeFileAtomic(aliasesUiPath, payload, { mode: 0o600, dirMode: 0o700 })
       .catch(() => { /* 映射写失败不影响聚合主流程 */ })
+  }
+  // 界面渠道种类覆盖（POST /api/billing/channels 写入）：只作用于组头徽章的显示，
+  // 不参与计费桶判定（direct/site 归属仍由真实路由配置决定）。键是稳定站点键。
+  const channelsUiPath = config.channelsPath ?? join(dshHome, '.dsh-usage-channels.json')
+  let uiChannelKinds: Record<string, ChannelKindOverride> = {}
+  const CHANNEL_KIND_VALUES: readonly ChannelKindOverride[] = ['direct', 'site', 'unknown']
+  void (async () => {
+    try {
+      const doc = JSON.parse(await readFile(channelsUiPath, 'utf8')) as { kinds?: unknown }
+      if (doc.kinds !== null && typeof doc.kinds === 'object' && !Array.isArray(doc.kinds)) {
+        const merged: Record<string, ChannelKindOverride> = {}
+        for (const [key, value] of Object.entries(doc.kinds as Record<string, unknown>)) {
+          if (typeof value === 'string' && (CHANNEL_KIND_VALUES as readonly string[]).includes(value)) {
+            merged[key] = value as ChannelKindOverride
+          }
+        }
+        uiChannelKinds = merged
+      }
+    } catch {
+      // 覆盖文件缺失/损坏：全部渠道按路由配置推导的种类显示。
+    }
+  })()
+  const persistUiChannelKinds = (): void => {
+    const payload = JSON.stringify({ version: 1, kinds: uiChannelKinds })
+    void writeFileAtomic(channelsUiPath, payload, { mode: 0o600, dirMode: 0o700 })
+      .catch(() => { /* 覆盖写失败不影响其它主流程 */ })
   }
   const aggregator = createUsageAggregator(adaptSessionPersistence(ctx.sessionPersistence), {
     ...(config.subscriptionProviders === undefined
@@ -1419,6 +1447,76 @@ export function apply(ctx: Context, config: UsageBillingConfig = {}): void {
       },
     }),
     'usage-billing: aliases route',
+  )
+
+  // 渠道种类显示覆盖（界面入口）：GET 读覆盖表；POST 整体替换并落盘。覆盖只改写
+  // 组头徽章的种类，计费桶判定不受影响。写操作按回环写防护模板校验。
+  ctx.effect(
+    () => ctx.webServer.register({
+      kind: 'exact',
+      path: '/api/billing/channels',
+      handler: async (req, res) => {
+        if (!guardLoopback(req, res, trustedHosts)) return
+        if (req.method !== 'GET' && req.method !== 'POST') {
+          res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'method not allowed' }))
+          return
+        }
+        if (req.method === 'GET') {
+          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ kinds: uiChannelKinds }))
+          return
+        }
+        if (!isLoopbackOrigin(req.headers.origin)) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'forbidden: loopback only' }))
+          return
+        }
+        if (!(req.headers['content-type'] ?? '').toLowerCase().includes('application/json')) {
+          res.writeHead(415, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'unsupported content-type' }))
+          return
+        }
+        let raw = ''
+        for await (const chunk of req) {
+          raw += chunk
+          if (raw.length > 16_384) {
+            res.writeHead(413, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: 'payload too large' }))
+            req.destroy()
+            return
+          }
+        }
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(raw)
+        } catch {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'invalid json' }))
+          return
+        }
+        const kinds = (parsed as { kinds?: unknown }).kinds
+        if (kinds === null || typeof kinds !== 'object' || Array.isArray(kinds)) {
+          res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'kinds must be an object' }))
+          return
+        }
+        const next: Record<string, ChannelKindOverride> = {}
+        for (const [key, value] of Object.entries(kinds as Record<string, unknown>)) {
+          if (typeof value !== 'string' || !(CHANNEL_KIND_VALUES as readonly string[]).includes(value)) {
+            res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ error: `channel kind must be one of direct|site|unknown: ${key}` }))
+            return
+          }
+          next[key] = value as ChannelKindOverride
+        }
+        uiChannelKinds = next
+        persistUiChannelKinds()
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ kinds: uiChannelKinds }))
+      },
+    }),
+    'usage-billing: channels route',
   )
 
   // usage_stats 工具开关：插件自带的读/写接口（不依赖宿主浏览器设置白名单）。

@@ -109,8 +109,10 @@ export function apply(ctx: Context): void {
           const [registered, configurable, picker] = await Promise.all([
             ctx.remote.llm.listProviders(),
             ctx.remote.llm.listConfigurableProviders(),
-            // 旧宿主可能没有 session/modelCatalog：失败降级为空目录，不阻塞探活。
-            ctx.remote.session.modelCatalog().catch(() => undefined),
+            // 旧宿主可能没有 session/modelCatalog：缺失时降级为空目录，不阻塞探活。
+            // 必须用可选链——旧宿主上 `ctx.remote.session` 是 undefined，直接访问属性
+            // 会同步抛 TypeError，被外层 catch 吞掉后整段探活退化为 checked:false。
+            ctx.remote.session?.modelCatalog?.().catch(() => undefined),
           ])
           if (!registered.ok || !configurable.ok) {
             return { checked: true, available: false, models: 0, failures: 0, okProviders: [], badProviders: [] }
@@ -127,46 +129,50 @@ export function apply(ctx: Context): void {
           }))
           const catalog: CatalogModel[] = []
           const seen = new Set<string>()
-          const okProviders: string[] = []
-          const badProviders: string[] = []
+          // 探活状态按路由 id 记账（显示名可能重复或随语言变化），下发给 UI 时
+          // 转成显示名列表供健康点与失效徽章渲染。
+          const nameById = new Map<string, string>()
+          const okProviderIds = new Set<string>()
+          const badProviderIds = new Set<string>()
           let models = 0
           for (const probe of probes) {
+            nameById.set(probe.provider.id, probe.provider.name)
             if ('failed' in probe) {
-              badProviders.push(probe.provider.name)
+              badProviderIds.add(probe.provider.id)
               continue
             }
-            okProviders.push(probe.provider.name)
+            okProviderIds.add(probe.provider.id)
             models += probe.models.length
             for (const model of probe.models) {
-              const key = `${probe.provider.name}\u0000${model.id}`
+              const key = `${probe.provider.id}\u0000${model.id}`
               if (seen.has(key)) continue
               seen.add(key)
               catalog.push({
                 id: model.id,
                 ...(typeof model.name === 'string' && model.name !== '' ? { name: model.name } : {}),
                 provider: probe.provider.name,
+                providerId: probe.provider.id,
               })
             }
           }
-          // 选择器目录并入：按组名对上既有 provider 则补模型（探活失败组复活），
-          // 无对应组则当新渠道追加。
+          // 选择器目录并入：按路由 id 对上既有 provider 则补模型（探活失败组复活），
+          // 无对应组则当新渠道追加。去重键用路由 id（group.id / provider.id 同源），
+          // 显示名可能随语言或厂商元数据变化，做键会把同一渠道拆成两组。
           if (picker?.ok) {
             for (const group of picker.value.groups) {
               const modelsToAdd = group.models.filter(model => {
-                const key = `${group.name}\u0000${model.id}`
+                const key = `${group.id}\u0000${model.id}`
                 if (seen.has(key)) return false
                 seen.add(key)
                 return true
               })
               if (modelsToAdd.length === 0) continue
-              if (!okProviders.includes(group.name) && !badProviders.includes(group.name)) {
-                okProviders.push(group.name)
-              } else {
-                const badIndex = badProviders.indexOf(group.name)
-                if (badIndex >= 0) {
-                  badProviders.splice(badIndex, 1)
-                  okProviders.push(group.name)
-                }
+              nameById.set(group.id, group.name)
+              // 该渠道在探活里失败但选择器给出了模型：视为可用（探活失败组复活）。
+              if (!okProviderIds.has(group.id) && !badProviderIds.has(group.id)) {
+                okProviderIds.add(group.id)
+              } else if (badProviderIds.delete(group.id)) {
+                okProviderIds.add(group.id)
               }
               models += modelsToAdd.length
               for (const model of modelsToAdd) {
@@ -174,17 +180,19 @@ export function apply(ctx: Context): void {
                   id: model.id,
                   ...(typeof model.name === 'string' && model.name !== '' ? { name: model.name } : {}),
                   provider: group.name,
+                  providerId: group.id,
                 })
               }
             }
           }
+          const displayOf = (id: string): string => nameById.get(id) ?? id
           return {
             checked: true,
-            available: okProviders.length > 0,
+            available: okProviderIds.size > 0,
             models,
-            failures: badProviders.length,
-            okProviders,
-            badProviders,
+            failures: badProviderIds.size,
+            okProviders: [...okProviderIds].map(displayOf),
+            badProviders: [...badProviderIds].map(displayOf),
             catalog,
           }
         } catch {

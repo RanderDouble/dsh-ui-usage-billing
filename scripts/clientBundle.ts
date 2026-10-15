@@ -267,6 +267,23 @@ function clientConfig(id: string, entry: string): UserConfig {
         // 内容随机重排，client.js 因此次次产生噪声 diff）。按键排序固定输出，产物可复现。
         const sortedExports = Object.entries(cssExports ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         for (const [local, exp] of sortedExports) classMap[local] = exp.name
+        // classMap 的紧凑编码：lightningcss 的 [hash] 按文件内容计算，同一文件的全部
+        // 类名共享同一个哈希前缀，逐条以 JSON 写出会把该前缀重复 N 遍。这里抽出公共
+        // 前缀，运行时按前缀拼接还原同名映射（取值与 JSON 形式完全一致）。仅当每个
+        // 类名都等于「公共前缀 + 本地名」时才启用；否则退回 JSON 形式。
+        const prefixOf = (local: string, name: string): string | undefined =>
+          name.length > local.length && name.endsWith(local) ? name.slice(0, name.length - local.length) : undefined
+        const prefixes = new Set<string>()
+        let compact = sortedExports.length > 0
+        for (const [local, exp] of sortedExports) {
+          const prefix = prefixOf(local, exp.name)
+          if (prefix === undefined || local.includes(' ') || prefix.includes(' ')) { compact = false; break }
+          prefixes.add(prefix)
+        }
+        if (prefixes.size !== 1) compact = false
+        const classMapCode = compact
+          ? `(() => { const p = ${JSON.stringify([...prefixes][0])}; const m = {}; for (const k of ${JSON.stringify(sortedExports.map(([local]) => local).join(' '))}.split(' ')) m[k] = p + k; return m })()`
+          : JSON.stringify(classMap)
         // One <style data-plugin> per module file; idempotent under re-evaluation.
         return [
           `const css = ${JSON.stringify(code.toString())};`,
@@ -278,7 +295,7 @@ function clientConfig(id: string, entry: string): UserConfig {
           '  tag.textContent = css;',
           '  document.head.appendChild(tag);',
           '}',
-          `export default ${JSON.stringify(classMap)};`,
+          `export default ${classMapCode};`,
         ].join('\n')
       },
     }],

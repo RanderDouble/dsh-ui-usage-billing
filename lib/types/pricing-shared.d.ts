@@ -79,6 +79,16 @@ export interface BalanceResponse {
     /** 官方余额差对账提示（对账开启且当日有余额消费时下发）。 */
     reconcile?: ReconcileNotice;
 }
+/**
+ * 渠道种类显示覆盖值：直连路由 / 中转站点 / 未知入口。纯显示层覆盖，不参与
+ * 计费桶判定（direct/site 归属仍由真实路由配置决定）。
+ */
+export type ChannelKindOverride = 'direct' | 'site' | 'unknown';
+/** `/api/billing/channels` 的响应与请求体：键是稳定站点键（`direct:<路由 id>` /
+ *  `site:<域名>` / `unknown`），值是覆盖后的种类。 */
+export interface ChannelsResponse {
+    kinds: Readonly<Record<string, ChannelKindOverride>>;
+}
 /** 官方余额差对账提示（drift 时携带供 UI 展示的已用/本地费用）。 */
 export interface ReconcileNotice {
     kind: 'baseline' | 'structure-reset' | 'flat' | 'ok' | 'drift';

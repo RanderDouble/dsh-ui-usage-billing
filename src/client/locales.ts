@@ -166,11 +166,14 @@ export type UsageBillingKey =
   | 'modelAliasModel'
   | 'modelAliasTarget'
   | 'modelAliasUnmapped'
-  | 'modelAliasSearch'
   | 'modelAliasSavedGroup'
   | 'modelAliasSave'
   | 'modelAliasSaved'
   | 'modelAliasNone'
+  | 'modelAliasAuto'
+  | 'modelAliasNoMatch'
+  | 'modelAliasCount'
+  | 'modelAliasChannelKind'
   | 'sessionStaleBadge'
   | 'sessionUntitled'
   | 'heatmapLess'
@@ -474,15 +477,18 @@ export const zh: Record<UsageBillingKey, string> = {
   'actualSpendAccrued': '累计',
   'actualSpendProvider': '来源',
   'modelAliases': '模型手动映射',
-  'modelAliasesHint': '把真实模型 id 指到目录条目：按渠道列出探活到的全部模型，右侧下拉选目标目录键（可先搜索），保存后历史用量按新键重新计价。标注「未收录」的模型保持原样不计费，映射后按目标条目计价；删除映射恢复原状。',
+  'modelAliasesHint': '把真实模型 id 指到目录条目：按渠道列出探活与真实流量里出现过的模型，右侧输入框输入即搜索目录键。标注「自动」的行已由归一化规则命中目录并按其计价，无需保存；标注「未收录」的模型保持原样不计费。',
   'modelAliasModel': '模型 id',
   'modelAliasTarget': '目录条目',
   'modelAliasUnmapped': '未映射',
-  'modelAliasSearch': '搜索模型',
   'modelAliasSavedGroup': '已存映射',
   'modelAliasSave': '保存映射',
   'modelAliasSaved': '已保存，正在重新计价',
   'modelAliasNone': '没有命中的模型',
+  'modelAliasAuto': '自动',
+  'modelAliasNoMatch': '无匹配条目',
+  'modelAliasCount': '{n} 个模型',
+  'modelAliasChannelKind': '渠道种类',
   'userPriceModel': '模型',
   'userPriceSource': '来源（中转站域名）',
   'userPriceSourceHint': '留空=默认价，或 https://api.中转站.com',
@@ -798,15 +804,18 @@ export const en: Record<UsageBillingKey, string> = {
   'actualSpendAccrued': 'Accrued',
   'actualSpendProvider': 'Provider',
   'modelAliases': 'Manual model mapping',
-  'modelAliasesHint': 'Point a real model id at a catalog entry: all probed models are listed by channel, pick the target key on the right (search first if needed), save, and historical usage is re-priced under the new key. Models tagged "uncatalogued" stay unpriced until mapped; removing a mapping restores the original.',
+  'modelAliasesHint': 'Point a real model id at a catalog entry: models seen by the probe and in real traffic are listed by channel, and the field on the right searches catalog keys as you type. Rows tagged "auto" already resolve to a catalog entry through normalization and are priced under it without saving; models tagged "uncatalogued" stay unpriced until mapped.',
   'modelAliasModel': 'Model id',
   'modelAliasTarget': 'Catalog entry',
   'modelAliasUnmapped': 'Unmapped',
-  'modelAliasSearch': 'Search models',
   'modelAliasSavedGroup': 'Saved mappings',
   'modelAliasSave': 'Save mapping',
   'modelAliasSaved': 'Saved, re-pricing',
   'modelAliasNone': 'No matching models',
+  'modelAliasAuto': 'Auto',
+  'modelAliasNoMatch': 'No matching entry',
+  'modelAliasCount': '{n} models',
+  'modelAliasChannelKind': 'Channel kind',
   'userPriceModel': 'Model',
   'userPriceSource': 'Source (relay origin)',
   'userPriceSourceHint': 'Empty = default; e.g. https://api.relay.com',

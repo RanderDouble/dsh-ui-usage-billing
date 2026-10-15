@@ -360,6 +360,7 @@ describe('usage-billing real Loader composition', () => {
     expect((await getJson(port, '/api/billing/balance')).status).toBe(404)
     expect((await getJson(port, '/api/billing/actual')).status).toBe(404)
     expect((await getJson(port, '/api/billing/aliases')).status).toBe(404)
+    expect((await getJson(port, '/api/billing/channels')).status).toBe(404)
     expect((await getJson(port, '/api/billing/notify-claim')).status).toBe(404)
   })
 
@@ -439,6 +440,57 @@ describe('usage-billing real Loader composition', () => {
     // 聚合端点在别名保存后仍正常响应（重折逻辑由 aggregate.ts 指纹机制保证）。
     const stats = await getJson(port, '/api/billing/usage-stats')
     expect(stats.status).toBe(200)
+  })
+
+  it('persists UI channel kind overrides for badge display', { timeout: 60_000 }, async () => {
+    const loaded = await loadCompositionWith({
+      entryConfig: root => [`channelsPath: '${join(root, 'usage-channels.json')}'`],
+    })
+    const port = loaded.webServer.port
+    const post = (body: unknown, origin = `http://127.0.0.1:${String(port)}`) =>
+      fetch(`http://127.0.0.1:${String(port)}/api/billing/channels`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin },
+        body: JSON.stringify(body),
+      })
+
+    // GET：初始覆盖表为空，徽章全部按真实路由配置推导。
+    const initial = await getJson(port, '/api/billing/channels')
+    expect(initial.status).toBe(200)
+    expect((initial.json as { kinds: Record<string, string> }).kinds).toEqual({})
+
+    // 回环 POST：写覆盖表并把新表原样回给调用方。
+    const written = await post({ kinds: { 'direct:deepseek': 'site', 'site:relay': 'unknown' } })
+    expect(written.status).toBe(200)
+    expect((await written.json() as { kinds: Record<string, string> }).kinds)
+      .toEqual({ 'direct:deepseek': 'site', 'site:relay': 'unknown' })
+    expect((await getJson(port, '/api/billing/channels')).json)
+      .toEqual({ kinds: { 'direct:deepseek': 'site', 'site:relay': 'unknown' } })
+
+    // 覆盖写整体替换：旧键不在新载荷里就消失。
+    expect((await post({ kinds: { 'direct:deepseek': 'direct' } })).status).toBe(200)
+    expect((await getJson(port, '/api/billing/channels')).json).toEqual({ kinds: { 'direct:deepseek': 'direct' } })
+
+    // 持久化：文件随后出现，形状是 version 1 + kinds。
+    await expect(pollForFile(join(root!, 'usage-channels.json'))).resolves.toBe(true)
+    const persisted = JSON.parse(await readFile(join(root!, 'usage-channels.json'), 'utf8')) as { version: number; kinds: Record<string, string> }
+    expect(persisted).toEqual({ version: 1, kinds: { 'direct:deepseek': 'direct' } })
+
+    // 非法载荷：枚举外的种类 → 400，非对象 kinds → 400；跨站 Origin → 403；
+    // 写防护只放行 GET/POST，其它动词在守卫层就被拒（与 aliases 同形）。
+    const badEnum = await post({ kinds: { 'direct:deepseek': 'vendor' } })
+    expect(badEnum.status).toBe(400)
+    expect((await badEnum.json() as { error: string }).error).toContain('direct|site|unknown')
+    expect((await post({ kinds: [] })).status).toBe(400)
+    expect((await post({ kinds: {} }, 'http://evil.example')).status).toBe(403)
+    const removed = await fetch(`http://127.0.0.1:${String(port)}/api/billing/channels`, {
+      method: 'DELETE',
+      headers: { origin: `http://127.0.0.1:${String(port)}` },
+    })
+    expect(removed.status).toBe(403)
+
+    // 被拒的写不改动已存覆盖表。
+    expect((await getJson(port, '/api/billing/channels')).json).toEqual({ kinds: { 'direct:deepseek': 'direct' } })
   })
 
   it('projects the usage-tool toggle through the new-generation settings model (issue #80)', { timeout: 60_000 }, async () => {

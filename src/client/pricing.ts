@@ -230,6 +230,12 @@ export interface CatalogModel {
   name?: string
   /** 厂商显示名（探活 group 名）。 */
   provider: string
+  /**
+   * 路由 id（探活 provider.id / 选择器 group.id）：真实流量的原始模型 id 按
+   * 路由 id 分组（`rawModelsByProvider`），映射 Tab 用它做渠道去重键与站点键，
+   * 避免显示名与路由 id 两套字符串把同一渠道拆成两组。
+   */
+  providerId?: string
 }
 
 /** 当前汇率：实时覆盖优先，缺省回退内置固定值。 */

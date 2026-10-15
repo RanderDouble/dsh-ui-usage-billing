@@ -65,9 +65,9 @@ import type { createBillingBudgetStore } from './budget-store.ts'
 import { convertFromCny,
   applyBuiltinCatalog, applyLiveCatalogModels, applyLivePricing, applyUserPrices, catalogEntries, canonModelId, computeCost, convertUnitPrice,
   DEFAULT_PEAK_SHARE, formatMoney, formatPercent, formatTokens, formatUnitPrice, getRateInfo, getUserPrices, isPromoActive,
-  channelCountdown, localDayStamp, modelOf, normalizeOriginInput, rateChannelOf, resolveCatalogKey, tierAt, userOriginPriceEntryOf, userPriceOf, type CatalogModel, type CostCurrency, type ModelEntry, type TokenUsageBuckets,
+  channelCountdown, localDayStamp, modelOf, normalizeOriginInput, rateChannelOf, tierAt, userOriginPriceEntryOf, userPriceOf, type CatalogModel, type CostCurrency, type ModelEntry, type TokenUsageBuckets,
 } from './pricing.ts'
-import type { BalanceResponse, LivePricing, ProviderBalance, ReconcileNotice, RelayQuota, RelayResponse } from '../pricing-shared.ts'
+import type { BalanceResponse, ChannelKindOverride, ChannelsResponse, LivePricing, ProviderBalance, ReconcileNotice, RelayQuota, RelayResponse } from '../pricing-shared.ts'
 import type { ActualResponse, ActualSpendRow } from '../actual.ts'
 import type { SubscriptionQuota, SubscriptionResponse } from '../pricing-shared.ts'
 import { NS, zh, en, type UsageBillingKey } from './locales.ts'
@@ -947,6 +947,9 @@ const ACTUAL_PATH = '/api/billing/actual'
 /** Path to the UI model-alias mapping endpoint (GET/POST) served by this plugin's node half. */
 const ALIASES_PATH = '/api/billing/aliases'
 
+/** Path to the UI channel-kind override endpoint (GET/POST) served by this plugin's node half. */
+const CHANNELS_PATH = '/api/billing/channels'
+
 /** Path to the subscription-plan quota endpoint served by this plugin's node half. */
 const SUBSCRIPTIONS_PATH = '/api/billing/subscriptions'
 
@@ -1308,6 +1311,8 @@ interface ProviderBillingGroup {
   dot: string | undefined
   /** 入口种类；纯订阅/余额组无入口为 vendor。 */
   channelKind: ProviderChannelKind
+  /** 通道组的稳定站点键（`direct:<路由 id>` / `site:<域名>`）；非通道组缺省。 */
+  siteKey?: string
 }
 
 /**
@@ -1692,6 +1697,10 @@ interface BillingDashboardProps {
   userPrices: UserPriceMap
   /** 用户自定义单价更新（父组件写回 localStorage 并重估显示）。 */
   onUserPrices: (next: UserPriceMap) => void
+  /** 渠道种类显示覆盖表（站点键 → 种类；服务端持久化）。 */
+  channelKinds: Readonly<Record<string, ChannelKindOverride>>
+  /** 渠道种类覆盖更新（父组件 POST 服务端覆盖表）。 */
+  onChannelKind: (siteKey: string, kind: ChannelKindOverride) => void
   health: ModelHealth
   balances: readonly ProviderBalance[]
   /** 实际消耗行（各来源余额采样差值账本，/api/billing/actual）。 */
@@ -1997,63 +2006,182 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
 }
 
 /**
- * 设置 Tab 的模型手动映射卡：把未收录的真实 model id 指到计费目录条目。
+ * 目标目录 combobox：可输入过滤 + 键盘可达的下拉面板（替代原生 select）。
+ * 输入即按费率表同一判定（目录键/名称/厂商三字段）过滤目录；空输入展示全量
+ * 候选并把当前值高亮，首项是「未映射」以保留解除映射的入口。
+ */
+function AliasCombobox({ value, options, onChange, t }: {
+  value: string
+  options: readonly ModelEntry[]
+  onChange: (key: string) => void
+  t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
+}): React.ReactNode {
+  const [text, setText] = useState(value)
+  const [open, setOpen] = useState(false)
+  const [active, setActive] = useState(0)
+  // 外部值变化（保存后清空草稿、服务端映射变化）同步回输入框。
+  useEffect(() => { setText(value) }, [value])
+  // 输入框内容仍等于当前值时视为「未输入」，展示全量候选。
+  const query = text === value ? '' : text
+  const choices = useMemo(() => {
+    const rows = query === '' ? options : filterRateRows(options, query)
+    return rows.map(entry => ({ key: entry.key, label: entry.key }))
+  }, [options, query])
+  // 空输入时补「未映射」首项：解除已有映射的可达入口。
+  const items = query === '' ? [{ key: '', label: t('modelAliasUnmapped') }, ...choices] : choices
+  const commit = (key: string): void => {
+    onChange(key)
+    setText(key)
+    setOpen(false)
+  }
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setOpen(true)
+      setActive(index => Math.min(index + 1, items.length - 1))
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setActive(index => Math.max(index - 1, 0))
+      return
+    }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      const picked = items[active]
+      if (picked !== undefined) commit(picked.key)
+      return
+    }
+    if (event.key === 'Escape') {
+      // 面板开着时 Escape 属于 combobox：放弃本次输入并关面板，同时阻止事件继续
+      // 冒泡到 Modal 注册在 document 上的 Escape 监听（否则整块仪表盘被关掉）。
+      if (!open) return
+      event.stopPropagation()
+      setOpen(false)
+      setText(value)
+    }
+  }
+  return (
+    <div className={css.aliasCombo}>
+      <input
+        className={css.userPriceInput}
+        type="text"
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
+        aria-label={t('modelAliasTarget')}
+        placeholder={t('modelAliasUnmapped')}
+        data-testid="billing-alias-to"
+        value={text}
+        onFocus={() => { setActive(0); setOpen(true) }}
+        onBlur={() => { setOpen(false) }}
+        onChange={event => { setText(event.target.value); setActive(0); setOpen(true) }}
+        onKeyDown={onKeyDown}
+      />
+      {open && (
+        <div className={css.aliasComboPanel} role="listbox" data-testid="billing-alias-options">
+          {items.length === 0 && (
+            <span className={css.aliasComboEmpty} data-testid="billing-alias-no-match">{t('modelAliasNoMatch')}</span>
+          )}
+          {items.map((item, index) => (
+            <button
+              key={item.key === '' ? '\u0000unmapped' : item.key}
+              type="button"
+              role="option"
+              aria-selected={index === active}
+              className={clsx(
+                css.aliasComboOption,
+                index === active && css.aliasComboOptionActive,
+                item.key === value && item.key !== '' && css.aliasComboOptionCurrent,
+              )}
+              data-testid="billing-alias-option"
+              data-value={item.key}
+              /* mousedown 阻止默认：输入框不失焦，blur 不会先关面板。 */
+              onMouseDown={event => { event.preventDefault(); commit(item.key) }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 映射 Tab 的模型手动映射卡：把未收录的真实 model id 指到计费目录条目。
  * 映射经 POST /api/billing/aliases 写入服务端（.dsh-usage-aliases.json 持久化），
  * 服务端合并 config.modelKeyAliases 后原位注入聚合器折叠指纹，历史用量按新键重折。
- * 每行一个模型 id（纯文本）+ 目标目录下拉框；行来自仪表盘未收录集与服务端已存映射的并集。
+ * 每行一个模型 id（纯文本）+ 目标目录 combobox；行来自探活目录与真实流量的并集，
+ * 按渠道（站点键）分组并可折叠，组头可点选渠道种类覆盖。
  */
-function ModelAliasCard({ health, rawModelsByProvider, lang, t }: {
+function ModelAliasCard({ health, rawModelsByProvider, lang, channelKinds, onChannelKind, t }: {
   /** 探活得到的模型清单（按渠道分组的行来源；未探活时退化为目录外模型行）。 */
   health: ModelHealth
-  /** 真实流量里出现过的原始模型 id（按 provider 通道分组）；探活覆盖不到的
+  /** 真实流量里出现过的原始模型 id（按 provider 路由 id 分组）；探活覆盖不到的
    *  通道（buddy/raccoon 等无 discovery 注册）也由此进入映射 Tab。 */
   rawModelsByProvider?: Record<string, readonly string[]>
   /** 界面语言（跟随币种）：通道显示名按此本地化。 */
   lang: BillingLanguage
+  /** 渠道种类显示覆盖（站点键 → 种类）；只影响组头徽章。 */
+  channelKinds: Readonly<Record<string, ChannelKindOverride>>
+  /** 更新某渠道的显示种类（写入服务端覆盖表）。 */
+  onChannelKind: (siteKey: string, kind: ChannelKindOverride) => void
   t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
 }): React.ReactNode {
   // 服务端已存映射（GET 合并视图）+ 本地编辑副本：drafts 只记录本次改动过的行。
   const [saved, setSaved] = useState<Readonly<Record<string, string>>>({})
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({})
   const [notice, setNotice] = useState('')
-  // 模糊匹配：与费率表搜索同一判定（key/名称/厂商三字段，大小写不敏感）。
-  const [query, setQuery] = useState('')
-  // 目录键候选（下拉框选项）。
-  const catalogKeys = catalogEntries().map(entry => entry.key)
-  // 行 = 探活目录全量模型（按渠道分组；CatalogModel.provider 即渠道名）。
-  // 探活未完成时退化为仪表盘未收录模型，保证面板非空。
+  // 折叠状态只记用户显式切换过的组；未记录时按组内容取默认值（不持久化）。
+  const [folded, setFolded] = useState<Readonly<Record<string, boolean>>>({})
+  // 目录条目（combobox 候选与目标校验共用；含名称/厂商供模糊匹配）。
+  const catalogOptions = catalogEntries()
+  // 自动归一命中的目录键：模型 id 本身不是目录键但归一化后命中目录条目
+  // （剥 sn- 前缀、剥 -free 后缀、尾日期段等），客户端可直接算出，无需保存映射。
+  const autoTargetOf = (id: string): string | undefined => {
+    const key = modelOf(id).key
+    return key === 'other' ? undefined : key
+  }
+  // 行 = 探活目录与真实流量原始 id 的并集，按站点键分组：探活 provider.id 与
+  // 真实流量的 provider 路由 id 是同一套键，按显示名分组会把同一渠道拆成两组。
   const grouped = useMemo(() => {
-    const rows = [...new Set([
-      ...(health.catalog ?? []).map(model => ({ id: model.id, channel: model.provider })),
-      // 真实流量的原始模型 id（按 provider 通道分组）：探活目录只覆盖有 discovery
-      // 注册的通道，buddy/raccoon 等插件通道的模型只有这里能列全。
-      ...Object.entries(rawModelsByProvider ?? {}).flatMap(([provider, models]) =>
-        models.map(id => ({ id, channel: channelDisplayName(`direct:${provider}`, lang) ?? `${t('channelDirect')} · ${provider}` }))),
-    ])]
-    // 已存映射的历史键若不在探活清单里（渠道已下线/探活失败），补进「已存映射」组。
-    const seen = new Set(rows.map(row => row.id))
-    for (const from of Object.keys(saved)) {
-      if (!seen.has(from)) rows.push({ id: from, channel: t('modelAliasSavedGroup') })
+    const rows: { id: string; siteKey: string; channel: string }[] = []
+    const seen = new Set<string>()
+    const push = (id: string, siteKey: string): void => {
+      const dedupe = `${siteKey}\u0000${id}`
+      if (seen.has(dedupe)) return
+      seen.add(dedupe)
+      rows.push({ id, siteKey, channel: channelDisplayName(siteKey, lang) ?? `${t('channelDirect')} · ${siteKey.slice(siteKey.indexOf(':') + 1)}` })
     }
-    const groups = new Map<string, { id: string; channel: string }[]>()
+    for (const model of health.catalog ?? []) {
+      push(model.id, `direct:${model.providerId ?? model.provider}`)
+    }
+    for (const [provider, models] of Object.entries(rawModelsByProvider ?? {})) {
+      for (const id of models) push(id, `direct:${provider}`)
+    }
+    // 已存映射的历史键若不在探活清单里（渠道已下线/探活失败），补进「已存映射」组。
+    const known = new Set(rows.map(row => row.id))
+    for (const from of Object.keys(saved)) {
+      if (!known.has(from)) rows.push({ id: from, siteKey: 'saved', channel: t('modelAliasSavedGroup') })
+    }
+    const buckets = new Map<string, { id: string; siteKey: string; channel: string }[]>()
     for (const row of rows) {
-      const bucket = groups.get(row.channel)
-      if (bucket === undefined) groups.set(row.channel, [row])
+      const bucket = buckets.get(row.siteKey)
+      if (bucket === undefined) buckets.set(row.siteKey, [row])
       else bucket.push(row)
     }
-    for (const bucket of groups.values()) bucket.sort((a, b) => a.id.localeCompare(b.id))
-    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh'))
-  }, [health.catalog, rawModelsByProvider, lang, t])
-  // 模糊过滤后的分组（查询为空时原样）。
-  const filtered = useMemo(() => {
-    if (query.trim() === '') return grouped
-    return grouped
-      .map(([channel, rows]) => [channel, filterRateRows(rows.map(row => ({ ...row, key: row.id })), query)] as const)
-      .filter(([, rows]) => rows.length > 0)
-      .map(([channel, rows]) => [channel, rows.map(({ id }) => ({ id, channel }))] as [string, { id: string; channel: string }[]])
-  }, [grouped, query])
-  // 未匹配判定：探活模型在目录（含内置别名/派生候选）中无归属 → 高亮。
-  const unmatched = (id: string): boolean => resolveCatalogKey(id) === id && modelOf(id).key === 'other'
+    return [...buckets.entries()]
+      .map(([siteKey, list]) => {
+        list.sort((a, b) => a.id.localeCompare(b.id))
+        // 默认展开：有需要动手查看的行——手动/已存映射，或归一化也没归宿的模型。
+        // 全部自动命中的渠道无需人工干预，默认收起（折叠开关的用处即在此）。
+        const mapped = list.some(({ id }) => drafts[id] !== undefined || saved[id] !== undefined)
+        const unmatched = list.some(({ id }) => autoTargetOf(id) === undefined)
+        return { siteKey, channel: list[0]?.channel ?? siteKey, rows: list, defaultOpen: mapped || unmatched }
+      })
+      .sort((a, b) => a.channel.localeCompare(b.channel, 'zh'))
+  }, [health.catalog, rawModelsByProvider, lang, saved, drafts, t])
   // 首次挂载拉取服务端合并映射，作为编辑起点（config 别名也显示，改坏可恢复）。
   useEffect(() => {
     let cancelled = false
@@ -2066,19 +2194,19 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, t }: {
       .catch(() => { /* 拉取失败保留空编辑态，保存仍可用 */ })
     return () => { cancelled = true }
   }, [])
-  const currentOf = (from: string): string => drafts[from] ?? saved[from] ?? ''
+  // 行当前值三级：手动草稿 > 服务端已存映射 > 目录归一化结果。
+  const currentOf = (from: string): string => drafts[from] ?? saved[from] ?? autoTargetOf(from) ?? ''
   const update = (from: string, to: string): void => {
     setDrafts(d => ({ ...d, [from]: to }))
     setNotice('')
   }
   const save = (): void => {
-    // 保存：行内当前值非空且不等于自身才入映射，全量替换服务端文件。
-    const aliases: Record<string, string> = {}
-    for (const [, rows] of grouped) {
-      for (const { id } of rows) {
-        const to = currentOf(id)
-        if (to !== '' && to !== id) aliases[id] = to
-      }
+    // 保存：以已存映射为底，叠加本次手动改动（空值 = 解除映射）；自动归一命中
+    // 无需入文件（归一逻辑升级后历史自动跟随），指向自身的行同样不入文件。
+    const aliases: Record<string, string> = { ...saved }
+    for (const [from, to] of Object.entries(drafts)) {
+      if (to === '' || to === from || to === autoTargetOf(from)) delete aliases[from]
+      else aliases[from] = to
     }
     void fetch(ALIASES_PATH, {
       method: 'POST',
@@ -2096,6 +2224,11 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, t }: {
       setNotice('')
     })
   }
+  const KIND_LABEL: Record<ChannelKindOverride, UsageBillingKey> = { direct: 'directTag', site: 'relayTag', unknown: 'unknownTag' }
+  const KIND_ORDER: readonly ChannelKindOverride[] = ['direct', 'site', 'unknown']
+  /** 站点键推导的种类：未覆盖时的初值。 */
+  const derivedKindOf = (siteKey: string): ChannelKindOverride =>
+    siteKey.startsWith('direct:') ? 'direct' : siteKey.startsWith('site:') ? 'site' : 'unknown'
   return (
     <section className={css.setCard} data-testid="billing-model-aliases">
       <div className={css.setCardHead}>
@@ -2103,62 +2236,89 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, t }: {
           <h3 className={css.setCardTitle}>{t('modelAliases')}</h3>
           <p className={css.setCardDesc}>{t('modelAliasesHint')}</p>
         </div>
-        <input
-          className={css.ubSearch}
-          type="search"
-          value={query}
-          placeholder={t('modelAliasSearch')}
-          aria-label={t('modelAliasSearch')}
-          data-testid="billing-alias-search"
-          onChange={event => { setQuery(event.target.value) }}
-        />
       </div>
       <div className={css.ctlCol}>
-        {filtered.length === 0 && (
+        {grouped.length === 0 && (
           <p className={css.setCardDesc} data-testid="billing-alias-none">{t('modelAliasNone')}</p>
         )}
-        {filtered.map(([channel, rows]) => (
-          <div key={channel} data-testid="billing-alias-group">
-            <div className={css.ctlLabel} data-testid="billing-alias-channel">{channel}</div>
-            {rows.map(({ id }) => {
-              const current = currentOf(id)
-              // 已存映射指向目录之外的键时，补一个选项保证下拉能显示当前值。
-              const options = current !== '' && !catalogKeys.includes(current) ? [...catalogKeys, current] : catalogKeys
-              return (
-                <div key={id} className={css.userPriceRow} data-testid="billing-alias-row">
-                  <div className={css.userPriceBody}>
-                    <div className={css.userPriceLineMeta}>
-                      <div className={css.userPriceField}>
-                        <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
-                        <span className={css.aliasModelId} data-testid="billing-alias-from">
-                          {id}
-                          {unmatched(id) && <span className={css.uncataloguedTag} data-testid="billing-alias-unmatched">{t('uncatalogued')}</span>}
-                        </span>
-                      </div>
-                      <div className={css.userPriceField}>
-                        <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
-                        <select
-                          className={css.userPriceInput}
-                          data-testid="billing-alias-to"
-                          value={current}
-                          aria-label={t('modelAliasTarget')}
-                          onChange={e => update(id, e.target.value)}
+        {grouped.map(group => {
+          const open = folded[group.siteKey] ?? group.defaultOpen
+          const overridable = group.siteKey !== 'saved'
+          const kind = channelKinds[group.siteKey] ?? derivedKindOf(group.siteKey)
+          return (
+            <div key={group.siteKey} data-testid="billing-alias-group" data-channel={group.siteKey}>
+              <div
+                className={clsx(css.ctlLabel, css.aliasGroupHead)}
+                data-testid="billing-alias-group-head"
+                aria-expanded={open}
+                role="button"
+                tabIndex={0}
+                onClick={() => { setFolded(prev => ({ ...prev, [group.siteKey]: !open })) }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
+                    setFolded(prev => ({ ...prev, [group.siteKey]: !open }))
+                  }
+                }}
+              >
+                <span data-testid="billing-alias-channel">{group.channel}</span>
+                <span className={css.aliasGroupMeta}>
+                  <span className={css.aliasGroupCount} data-testid="billing-alias-group-count">{t('modelAliasCount', { n: group.rows.length })}</span>
+                  {overridable && (
+                    <span className={css.aliasKindPicker} role="group" aria-label={t('modelAliasChannelKind')}>
+                      {KIND_ORDER.map(option => (
+                        <button
+                          key={option}
+                          type="button"
+                          className={clsx(
+                            css.aliasKindBtn,
+                            option === kind && (option === 'site' ? css.aliasKindBtnOnRelay : css.aliasKindBtnOn),
+                          )}
+                          aria-pressed={option === kind}
+                          data-testid={`billing-alias-kind-${option}`}
+                          /* 点种类不改折叠状态。 */
+                          onClick={event => { event.stopPropagation(); onChannelKind(group.siteKey, option) }}
                         >
-                          <option value="">{t('modelAliasUnmapped')}</option>
-                          {options.map(key => <option key={key} value={key}>{key}</option>)}
-                        </select>
+                          {t(KIND_LABEL[option])}
+                        </button>
+                      ))}
+                    </span>
+                  )}
+                </span>
+              </div>
+              {open && group.rows.map(({ id }) => {
+                const current = currentOf(id)
+                const auto = drafts[id] === undefined && saved[id] === undefined && autoTargetOf(id) !== undefined && autoTargetOf(id) !== id
+                // 真正映射不到：手动、已存、自动归一三者都没有归宿。
+                const unmapped = drafts[id] === undefined && saved[id] === undefined && autoTargetOf(id) === undefined
+                return (
+                  <div key={id} className={css.userPriceRow} data-testid="billing-alias-row">
+                    <div className={css.userPriceBody}>
+                      <div className={css.userPriceLineMeta}>
+                        <div className={css.userPriceField}>
+                          <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
+                          <span className={css.aliasModelId} data-testid="billing-alias-from">
+                            {id}
+                            {unmapped && <span className={css.uncataloguedTag} data-testid="billing-alias-unmatched">{t('modelAliasUnmapped')}</span>}
+                          </span>
+                        </div>
+                        <div className={css.userPriceField}>
+                          <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
+                          <AliasCombobox value={current} options={catalogOptions} t={t} onChange={key => { update(id, key) }} />
+                          {auto && <span className={css.aliasAutoTag} data-testid="billing-alias-auto">{t('modelAliasAuto')}</span>}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              )
-            })}
-          </div>
-        ))}
+                )
+              })}
+            </div>
+          )
+        })}
         {notice !== '' && (
           <p className={css.setCardDesc} data-testid="billing-alias-notice">{notice}</p>
         )}
-        {filtered.length > 0 && (
+        {grouped.length > 0 && (
           <div className={css.ctlRow}>
             <button type="button" className={css.exportButton} data-testid="billing-alias-save" onClick={save}>
               {t('modelAliasSave')}
@@ -2173,7 +2333,7 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, t }: {
 }
 
 function BillingDashboard({
-  stats, t, onClose, userPrices, onUserPrices, health, balances, actualSpend, reconcile, quotas, relayQuotas, currency, onCurrency, language, onLanguage, turns,
+  stats, t, onClose, userPrices, onUserPrices, channelKinds, onChannelKind, health, balances, actualSpend, reconcile, quotas, relayQuotas, currency, onCurrency, language, onLanguage, turns,
   renderSlot, budgetEnabled, budgetAmount, onToggleBudget, onBudgetAmount,
   peakConfig, onPeakConfig, onPreviewPeak, floatPrefs, onFloatPrefs, cardPrefs, onCardPrefs, sitePrefs, onSitePrefs,
   liveCostPrefs, onLiveCostPrefs, quotasStale,
@@ -2662,6 +2822,7 @@ function BillingDashboard({
         // 健康点取该通道费用最高模型的品牌健康（通道本身不做探活）。
         dot: providerDot(health, rows[0]?.provider ?? ''),
         channelKind: kindByChannel.get(name) ?? 'unknown',
+        siteKey: idByChannel.get(name) ?? name,
       })
     }
     for (const [groupKey, name] of subGroupNames) {
@@ -2708,7 +2869,7 @@ function BillingDashboard({
         if (a.models.length === 0) return 1
         return a.name.localeCompare(b.name, 'zh')
       })
-  }, [stats.byDayModelsSite, stats.byModel, quotas, balances, health, lang, t, providersTodayOnly])
+  }, [stats.byDayModelsSite, stats.byModel, quotas, balances, health, lang, t, providersTodayOnly, channelKinds])
 
   // 一键展开/收起（issue #77）：只作用于有明细可展开的组（模型行或订阅卡）；
   // 纯余额组无内容可折叠，不参与计数与按钮文案判定。
@@ -3572,7 +3733,14 @@ function BillingDashboard({
 
           {tab === 'aliases' && (
             <div className={css.tabPanel} data-testid="billing-tab-panel-aliases">
-              <ModelAliasCard health={health} rawModelsByProvider={stats.rawModelsByProvider ?? {}} lang={lang} t={t} />
+              <ModelAliasCard
+                health={health}
+                rawModelsByProvider={stats.rawModelsByProvider ?? {}}
+                lang={lang}
+                channelKinds={channelKinds}
+                onChannelKind={onChannelKind}
+                t={t}
+              />
             </div>
           )}
 
@@ -3814,11 +3982,13 @@ function BillingDashboard({
                               // 入口徽章：直连/中转/未知一眼可辨；vendor（纯订阅/余额组）无徽章。
                               // 直连组拆「直连 · X」为徽章 + 路由名；官方直连等无前缀名整名显示。
                               // 未知组徽章即文案，不再重复渲染「未知路由」名字。
+                              // 渠道种类显示覆盖优先于路由配置推导的种类（映射 Tab 可改）。
+                              const kind = (group.siteKey !== undefined ? channelKinds[group.siteKey] : undefined) ?? group.channelKind
                               const displayName = providerName(group.name)
-                              const directRest = group.channelKind === 'direct' ? directChannelRoute(displayName) : undefined
-                              const badge = group.channelKind === 'direct' ? t('directTag')
-                                : group.channelKind === 'site' ? t('relayTag')
-                                  : group.channelKind === 'unknown' ? t('unknownTag')
+                              const directRest = kind === 'direct' ? directChannelRoute(displayName) : undefined
+                              const badge = kind === 'direct' ? t('directTag')
+                                : kind === 'site' ? t('relayTag')
+                                  : kind === 'unknown' ? t('unknownTag')
                                     : undefined
                               return (
                                 <>
@@ -3826,16 +3996,16 @@ function BillingDashboard({
                                     <span
                                       className={clsx(
                                         css.kindBadge,
-                                        group.channelKind === 'direct' && css.kindBadgeDirect,
-                                        group.channelKind === 'site' && css.kindBadgeRelay,
-                                        group.channelKind === 'unknown' && css.kindBadgeUnknown,
+                                        kind === 'direct' && css.kindBadgeDirect,
+                                        kind === 'site' && css.kindBadgeRelay,
+                                        kind === 'unknown' && css.kindBadgeUnknown,
                                       )}
                                       data-testid="billing-kind-badge"
                                     >
                                       {badge}
                                     </span>
                                   )}
-                                  {group.channelKind !== 'unknown' && (
+                                  {kind !== 'unknown' && (
                                     <span className={css.providerGroupName}>{directRest ?? displayName}</span>
                                   )}
                                 </>
@@ -4506,6 +4676,32 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
     applyUserPrices(next)
     saveUserPrices(next)
   }, [])
+  // 渠道种类显示覆盖：服务端持久化（GET 读、POST 整体替换）。只改组头徽章的种类，
+  // 不参与计费桶判定。写操作失败保留本地值，下次 GET 会拉回服务端真值。
+  const [channelKinds, setChannelKinds] = useState<Readonly<Record<string, ChannelKindOverride>>>({})
+  useEffect(() => {
+    let cancelled = false
+    void fetch(CHANNELS_PATH).then(response => response.json() as Promise<ChannelsResponse>)
+      .then(doc => {
+        if (cancelled || doc.kinds === undefined || typeof doc.kinds !== 'object') return
+        setChannelKinds(doc.kinds)
+      })
+      .catch(() => { /* 拉取失败按路由配置推导的种类显示 */ })
+    return () => { cancelled = true }
+  }, [])
+  const updateChannelKind = useCallback((siteKey: string, kind: ChannelKindOverride): void => {
+    setChannelKinds((prev) => {
+      const next = { ...prev, [siteKey]: kind }
+      void fetch(CHANNELS_PATH, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kinds: next }),
+      }).then(response => {
+        if (!response.ok) throw new Error(`channels HTTP ${String(response.status)}`)
+      }).catch(() => { /* 写失败保留本地覆盖，下次 GET 拉回服务端真值 */ })
+      return next
+    })
+  }, [])
   // 显示重估后的统计：用户价变化或新快照到达时重新计算（无用户价时原样返回）。
   const displayStats = useMemo(() => recostWithUserPrices(stats), [stats, userPrices])
   // 严格联动（仅本插件，不影响宿主全局语言）：币种=USD 时面板文案切英文，CNY 时切中文。
@@ -4909,6 +5105,8 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
           onClose={close}
           userPrices={userPrices}
           onUserPrices={updateUserPrices}
+          channelKinds={channelKinds}
+          onChannelKind={updateChannelKind}
           health={health}
           balances={balances}
           actualSpend={actualSpend}
