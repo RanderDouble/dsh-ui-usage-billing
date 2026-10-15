@@ -2079,7 +2079,7 @@ function AliasCombobox({ value, options, onChange, t }: {
         onKeyDown={onKeyDown}
       />
       {open && (
-        <div className={css.aliasComboPanel} role="listbox" data-testid="billing-alias-options">
+        <div className={clsx(css.aliasComboPanel, css.balanceDetailPop)} role="listbox" data-testid="billing-alias-options">
           {items.length === 0 && (
             <span className={css.aliasComboEmpty} data-testid="billing-alias-no-match">{t('modelAliasNoMatch')}</span>
           )}
@@ -2239,16 +2239,16 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, channelKinds, onCha
       </div>
       <div className={css.ctlCol}>
         {grouped.length === 0 && (
-          <p className={css.setCardDesc} data-testid="billing-alias-none">{t('modelAliasNone')}</p>
+          <p className={css.emptyRow} data-testid="billing-alias-none">{t('modelAliasNone')}</p>
         )}
         {grouped.map(group => {
           const open = folded[group.siteKey] ?? group.defaultOpen
           const overridable = group.siteKey !== 'saved'
           const kind = channelKinds[group.siteKey] ?? derivedKindOf(group.siteKey)
           return (
-            <div key={group.siteKey} data-testid="billing-alias-group" data-channel={group.siteKey}>
+            <div key={group.siteKey} className={css.providerGroup} data-testid="billing-alias-group" data-channel={group.siteKey}>
               <div
-                className={clsx(css.ctlLabel, css.aliasGroupHead)}
+                className={clsx(css.providerGroupHead, css.providerGroupCollapsible)}
                 data-testid="billing-alias-group-head"
                 aria-expanded={open}
                 role="button"
@@ -2261,18 +2261,23 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, channelKinds, onCha
                   }
                 }}
               >
-                <span data-testid="billing-alias-channel">{group.channel}</span>
-                <span className={css.aliasGroupMeta}>
-                  <span className={css.aliasGroupCount} data-testid="billing-alias-group-count">{t('modelAliasCount', { n: group.rows.length })}</span>
+                <span className={css.providerGroupTitle}>
                   {overridable && (
-                    <span className={css.aliasKindPicker} role="group" aria-label={t('modelAliasChannelKind')}>
+                    <span className={clsx(css.kindBadge, kind === 'site' && css.kindBadgeRelay, kind === 'unknown' && css.kindBadgeUnknown)} data-testid="billing-alias-kind-badge">{t(KIND_LABEL[kind])}</span>
+                  )}
+                  <span className={css.providerGroupName} data-testid="billing-alias-channel">{group.channel}</span>
+                  <span className={css.providerGroupBadge} data-testid="billing-alias-group-count">{t('modelAliasCount', { n: group.rows.length })}</span>
+                </span>
+                {overridable && (
+                  <span className={css.providerGroupMeta}>
+                    <span className={css.rangeToggle} role="group" aria-label={t('modelAliasChannelKind')}>
                       {KIND_ORDER.map(option => (
                         <button
                           key={option}
                           type="button"
                           className={clsx(
-                            css.aliasKindBtn,
-                            option === kind && (option === 'site' ? css.aliasKindBtnOnRelay : css.aliasKindBtnOn),
+                            css.rangeButton,
+                            option === kind && (option === 'site' ? css.aliasKindOnRelay : option === 'unknown' ? css.aliasKindOnUnknown : css.aliasKindOn),
                           )}
                           aria-pressed={option === kind}
                           data-testid={`billing-alias-kind-${option}`}
@@ -2283,8 +2288,8 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, channelKinds, onCha
                         </button>
                       ))}
                     </span>
-                  )}
-                </span>
+                  </span>
+                )}
               </div>
               {open && group.rows.map(({ id }) => {
                 const current = currentOf(id)
@@ -2297,15 +2302,17 @@ function ModelAliasCard({ health, rawModelsByProvider, lang, channelKinds, onCha
                       <div className={css.userPriceLineMeta}>
                         <div className={css.userPriceField}>
                           <span className={css.ctlLabel}>{t('modelAliasModel')}</span>
-                          <span className={css.aliasModelId} data-testid="billing-alias-from">
-                            {id}
-                            {unmapped && <span className={css.uncataloguedTag} data-testid="billing-alias-unmatched">{t('modelAliasUnmapped')}</span>}
+                          <span className={css.aliasModelLine}>
+                            <span className={css.aliasModelId} data-testid="billing-alias-from">{id}</span>
+                            {unmapped && <span className={clsx(css.uncataloguedTag, css.aliasTag)} data-testid="billing-alias-unmatched">{t('modelAliasUnmapped')}</span>}
                           </span>
                         </div>
                         <div className={css.userPriceField}>
                           <span className={css.ctlLabel}>{t('modelAliasTarget')}</span>
-                          <AliasCombobox value={current} options={catalogOptions} t={t} onChange={key => { update(id, key) }} />
-                          {auto && <span className={css.aliasAutoTag} data-testid="billing-alias-auto">{t('modelAliasAuto')}</span>}
+                          <span className={css.aliasTargetLine}>
+                            <AliasCombobox value={current} options={catalogOptions} t={t} onChange={key => { update(id, key) }} />
+                            {auto && <span className={clsx(css.aliasTag, css.aliasTagAuto)} data-testid="billing-alias-auto">{t('modelAliasAuto')}</span>}
+                          </span>
                         </div>
                       </div>
                     </div>

@@ -234,5 +234,10 @@ describe('model alias card', () => {
     const post = calls.find(call => call.url.includes('/api/billing/channels') && call.method === 'POST')!
     expect(post.body).toEqual({ kinds: { 'direct:deepseek': 'site' } })
     expect(group.querySelector('[data-testid="billing-alias-kind-site"]')?.getAttribute('aria-pressed')).toBe('true')
+    // 组头徽章随覆盖表更新，且三种种类共用一个分段控件（复用仪表盘既有的段控样式）。
+    expect(group.querySelector('[data-testid="billing-alias-kind-badge"]')?.textContent).toBe(t('relayTag'))
+    const segmented = group.querySelector('[data-testid="billing-alias-kind-direct"]')?.parentElement
+    expect(segmented?.getAttribute('role')).toBe('group')
+    expect(segmented?.querySelectorAll('button').length).toBe(3)
   })
 })
