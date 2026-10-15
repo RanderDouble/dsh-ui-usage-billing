@@ -103,10 +103,14 @@ export function apply(ctx: Context): void {
       checkModels: async (): Promise<ModelHealth> => {
         // 0.1.2 的 Remote 面不再有聚合 llm.models：先取活跃路由，再按可配置
         // 目录逐项 discoverModels。已知 provider 走适配器本地目录，不额外打网络。
+        // 会话选择器同源的 modelCatalog（逐 provider 调 adapter.listModels）作为
+        // 第二来源并入：buddy/raccoon 等未登记目录入口的渠道由此列全。
         try {
-          const [registered, configurable] = await Promise.all([
+          const [registered, configurable, picker] = await Promise.all([
             ctx.remote.llm.listProviders(),
             ctx.remote.llm.listConfigurableProviders(),
+            // 旧宿主可能没有 session/modelCatalog：失败降级为空目录，不阻塞探活。
+            ctx.remote.session.modelCatalog().catch(() => undefined),
           ])
           if (!registered.ok || !configurable.ok) {
             return { checked: true, available: false, models: 0, failures: 0, okProviders: [], badProviders: [] }
@@ -122,6 +126,7 @@ export function apply(ctx: Context): void {
               : { provider, failed: true as const }
           }))
           const catalog: CatalogModel[] = []
+          const seen = new Set<string>()
           const okProviders: string[] = []
           const badProviders: string[] = []
           let models = 0
@@ -133,11 +138,44 @@ export function apply(ctx: Context): void {
             okProviders.push(probe.provider.name)
             models += probe.models.length
             for (const model of probe.models) {
+              const key = `${probe.provider.name}\u0000${model.id}`
+              if (seen.has(key)) continue
+              seen.add(key)
               catalog.push({
                 id: model.id,
                 ...(typeof model.name === 'string' && model.name !== '' ? { name: model.name } : {}),
                 provider: probe.provider.name,
               })
+            }
+          }
+          // 选择器目录并入：按组名对上既有 provider 则补模型（探活失败组复活），
+          // 无对应组则当新渠道追加。
+          if (picker?.ok) {
+            for (const group of picker.value.groups) {
+              const modelsToAdd = group.models.filter(model => {
+                const key = `${group.name}\u0000${model.id}`
+                if (seen.has(key)) return false
+                seen.add(key)
+                return true
+              })
+              if (modelsToAdd.length === 0) continue
+              if (!okProviders.includes(group.name) && !badProviders.includes(group.name)) {
+                okProviders.push(group.name)
+              } else {
+                const badIndex = badProviders.indexOf(group.name)
+                if (badIndex >= 0) {
+                  badProviders.splice(badIndex, 1)
+                  okProviders.push(group.name)
+                }
+              }
+              models += modelsToAdd.length
+              for (const model of modelsToAdd) {
+                catalog.push({
+                  id: model.id,
+                  ...(typeof model.name === 'string' && model.name !== '' ? { name: model.name } : {}),
+                  provider: group.name,
+                })
+              }
             }
           }
           return {
