@@ -909,6 +909,8 @@ export interface UsageStats {
   }>
   /** 不可计价模型 id（未收录/无价，费用按 0 计）；旧快照可能缺失。 */
   unpricedModels?: readonly string[]
+  /** 真实流量的原始模型 id（按 provider 通道分组）；映射 Tab 行来源，旧快照可能缺失。 */
+  rawModelsByProvider?: Record<string, readonly string[]>
   /** 联网搜索请求的单次费用估算（人民币元，配置回显）；0 或缺省 = 未启用估算。 */
   searchCallEstimateCny?: number
   /** 按角色费用归因（估算口径：输出实测，输入按消息长度摊分）；旧快照可能缺失。 */
@@ -1022,6 +1024,9 @@ async function loadUsageStats(): Promise<UsageStats | null> {
       ...(isObj(candidate.byTier) ? { byTier: candidate.byTier } : {}),
       ...(isObj(candidate.byTool) ? { byTool: candidate.byTool } : {}),
       ...(Array.isArray(candidate.unpricedModels) ? { unpricedModels: candidate.unpricedModels } : {}),
+      ...(isObj(candidate.rawModelsByProvider)
+        ? { rawModelsByProvider: candidate.rawModelsByProvider as Record<string, readonly string[]> }
+        : {}),
       ...(typeof candidate.staleLedgerSessions === 'number' ? { staleLedgerSessions: candidate.staleLedgerSessions } : {}),
       ...(typeof candidate.unreadableSessions === 'number' ? { unreadableSessions: candidate.unreadableSessions } : {}),
       ...(typeof candidate.unreadableFormatSessions === 'number' ? { unreadableFormatSessions: candidate.unreadableFormatSessions } : {}),
@@ -1997,9 +2002,14 @@ function UserPriceCard({ userPrices, onUserPrices, t }: {
  * 服务端合并 config.modelKeyAliases 后原位注入聚合器折叠指纹，历史用量按新键重折。
  * 每行一个模型 id（纯文本）+ 目标目录下拉框；行来自仪表盘未收录集与服务端已存映射的并集。
  */
-function ModelAliasCard({ health, t }: {
+function ModelAliasCard({ health, rawModelsByProvider, lang, t }: {
   /** 探活得到的模型清单（按渠道分组的行来源；未探活时退化为目录外模型行）。 */
   health: ModelHealth
+  /** 真实流量里出现过的原始模型 id（按 provider 通道分组）；探活覆盖不到的
+   *  通道（buddy/raccoon 等无 discovery 注册）也由此进入映射 Tab。 */
+  rawModelsByProvider?: Record<string, readonly string[]>
+  /** 界面语言（跟随币种）：通道显示名按此本地化。 */
+  lang: BillingLanguage
   t: (key: UsageBillingKey, params?: Record<string, unknown>) => string
 }): React.ReactNode {
   // 服务端已存映射（GET 合并视图）+ 本地编辑副本：drafts 只记录本次改动过的行。
@@ -2015,7 +2025,10 @@ function ModelAliasCard({ health, t }: {
   const grouped = useMemo(() => {
     const rows = [...new Set([
       ...(health.catalog ?? []).map(model => ({ id: model.id, channel: model.provider })),
-      ...(saved !== undefined ? [] : []),
+      // 真实流量的原始模型 id（按 provider 通道分组）：探活目录只覆盖有 discovery
+      // 注册的通道，buddy/raccoon 等插件通道的模型只有这里能列全。
+      ...Object.entries(rawModelsByProvider ?? {}).flatMap(([provider, models]) =>
+        models.map(id => ({ id, channel: channelDisplayName(`direct:${provider}`, lang) ?? `${t('channelDirect')} · ${provider}` }))),
     ])]
     // 已存映射的历史键若不在探活清单里（渠道已下线/探活失败），补进「已存映射」组。
     const seen = new Set(rows.map(row => row.id))
@@ -2030,7 +2043,7 @@ function ModelAliasCard({ health, t }: {
     }
     for (const bucket of groups.values()) bucket.sort((a, b) => a.id.localeCompare(b.id))
     return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh'))
-  }, [health.catalog, saved, t])
+  }, [health.catalog, rawModelsByProvider, lang, t])
   // 模糊过滤后的分组（查询为空时原样）。
   const filtered = useMemo(() => {
     if (query.trim() === '') return grouped
@@ -3559,7 +3572,7 @@ function BillingDashboard({
 
           {tab === 'aliases' && (
             <div className={css.tabPanel} data-testid="billing-tab-panel-aliases">
-              <ModelAliasCard health={health} t={t} />
+              <ModelAliasCard health={health} rawModelsByProvider={stats.rawModelsByProvider ?? {}} lang={lang} t={t} />
             </div>
           )}
 

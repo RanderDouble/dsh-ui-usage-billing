@@ -319,6 +319,9 @@ export interface UsageStatsDocument {
     byRole?: RoleCost;
     /** 不可计价的模型 id（未收录 / 无价，费用按 0 计）；供面板提示用户自查与反馈。 */
     unpricedModels?: readonly string[];
+    /** 真实流量里出现过的原始模型 id，按 provider 通道分组（归一化前的原值）；
+     *  供映射 Tab 列出各渠道实际用过的模型。旧快照缺失。 */
+    rawModelsByProvider?: Record<string, readonly string[]>;
     /** 联网搜索请求的单次费用估算（人民币元，配置回显）；0 或缺省 = 未启用估算。 */
     searchCallEstimateCny?: number;
     /**
@@ -501,6 +504,9 @@ export interface SessionFold {
     bySite: Map<string, ModelUsage>;
     /** 不可计价模型 id（未收录/无价，且非订阅）集合；跨会话合并后输出给面板提示。 */
     unpricedModels: Set<string>;
+    /** 真实流量里出现过的原始模型 id，按 provider 通道分组（归一化前的原值）；
+     *  供映射 Tab 列出各渠道实际用过的模型（探活目录覆盖不到的通道也在内）。 */
+    rawModelsByProvider: Map<string, Set<string>>;
     /** 每个模型 key 在本会话内走订阅通道的调用数（合并时跨会话累加判定 plan）。 */
     planCalls: Map<string, number>;
     /** 三维格（日期×模型×站点）各自的订阅调用数，键 = {@link planSiteKey}：
@@ -547,6 +553,8 @@ export interface SerializedSessionFold {
     byTool?: Record<string, number>;
     bySite: Record<string, ModelUsage>;
     unpricedModels: string[];
+    /** 真实流量的原始模型 id（按 provider 分组）；v23 起新增，旧账本行缺失（合并按空处理）。 */
+    rawModelsByProvider?: Record<string, string[]>;
     planCalls: Record<string, number>;
     /** 三维格订阅计数；旧账本行缺失（合并按空处理，格级 plan 保守不置位）。 */
     planSiteCalls?: Record<string, number>;
@@ -599,7 +607,7 @@ export interface UsageLedgerDocument {
  * 会话费用只剩最近一段，issue #29）。
  * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
  */
-export declare const FOLD_VERSION = 22;
+export declare const FOLD_VERSION = 23;
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
  * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并
@@ -630,6 +638,8 @@ export interface UsageLedgerStore {
     load(): Promise<unknown | undefined>;
     save(document: UsageLedgerDocument): Promise<void>;
 }
+/** Serialize Map/Set-heavy fold state into a JSON-safe ledger entry. */
+export declare function serializeFold(fold: SessionFold): SerializedSessionFold;
 /**
  * 消息文本长度：user/tool 角色分摊输入成本的启发式依据。字符串内容取其
  * 长度；内容块数组累计文本块长度；其余形状按 0 计（durable 边界收窄）。

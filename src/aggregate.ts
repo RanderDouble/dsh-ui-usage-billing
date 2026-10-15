@@ -479,6 +479,9 @@ export interface UsageStatsDocument {
   byRole?: RoleCost
   /** 不可计价的模型 id（未收录 / 无价，费用按 0 计）；供面板提示用户自查与反馈。 */
   unpricedModels?: readonly string[]
+  /** 真实流量里出现过的原始模型 id，按 provider 通道分组（归一化前的原值）；
+   *  供映射 Tab 列出各渠道实际用过的模型。旧快照缺失。 */
+  rawModelsByProvider?: Record<string, readonly string[]>
   /** 联网搜索请求的单次费用估算（人民币元，配置回显）；0 或缺省 = 未启用估算。 */
   searchCallEstimateCny?: number
   /**
@@ -822,6 +825,9 @@ export interface SessionFold {
   bySite: Map<string, ModelUsage>
   /** 不可计价模型 id（未收录/无价，且非订阅）集合；跨会话合并后输出给面板提示。 */
   unpricedModels: Set<string>
+  /** 真实流量里出现过的原始模型 id，按 provider 通道分组（归一化前的原值）；
+   *  供映射 Tab 列出各渠道实际用过的模型（探活目录覆盖不到的通道也在内）。 */
+  rawModelsByProvider: Map<string, Set<string>>
   /** 每个模型 key 在本会话内走订阅通道的调用数（合并时跨会话累加判定 plan）。 */
   planCalls: Map<string, number>
   /** 三维格（日期×模型×站点）各自的订阅调用数，键 = {@link planSiteKey}：
@@ -870,6 +876,8 @@ export interface SerializedSessionFold {
   byTool?: Record<string, number>
   bySite: Record<string, ModelUsage>
   unpricedModels: string[]
+  /** 真实流量的原始模型 id（按 provider 分组）；v23 起新增，旧账本行缺失（合并按空处理）。 */
+  rawModelsByProvider?: Record<string, string[]>
   planCalls: Record<string, number>
   /** 三维格订阅计数；旧账本行缺失（合并按空处理，格级 plan 保守不置位）。 */
   planSiteCalls?: Record<string, number>
@@ -981,7 +989,7 @@ export interface UsageLedgerDocument {
 // commandcode）不再依赖白名单，合成直连路由视图按官方目录价计价（issue #91）；
 // 同时模型别名（modelKeyAliases）进折叠指纹，别名改动后历史行按新目录键重算。
 // bump 让存量 unknown 行升级后重折补齐费用，仅日志已删的行留在旧口径。
-export const FOLD_VERSION = 22
+export const FOLD_VERSION = 23
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
@@ -1072,7 +1080,7 @@ export interface UsageLedgerStore {
 }
 
 /** Serialize Map/Set-heavy fold state into a JSON-safe ledger entry. */
-function serializeFold(fold: SessionFold): SerializedSessionFold {
+export function serializeFold(fold: SessionFold): SerializedSessionFold {
   // 性能以摘要持久化（P0-2）：体积 O(模型数+小时×模型数)，逐样本数组不再落盘。
   const { byModel: perfDigest, byHourModel: perfHourDigest } = perfDigestsOf(fold.perf)
   return {
@@ -1086,6 +1094,9 @@ function serializeFold(fold: SessionFold): SerializedSessionFold {
     byTool: Object.fromEntries(fold.byTool),
     bySite: Object.fromEntries(fold.bySite),
     unpricedModels: [...fold.unpricedModels],
+    ...(fold.rawModelsByProvider.size === 0 ? {} : { rawModelsByProvider: Object.fromEntries(
+      [...fold.rawModelsByProvider].map(([provider, models]) => [provider, [...models].sort()]),
+    ) }),
     planCalls: Object.fromEntries(fold.planCalls),
     planSiteCalls: Object.fromEntries(fold.planSiteCalls),
     turns: fold.turns,
@@ -1113,6 +1124,8 @@ function deserializeFold(fold: SerializedSessionFold): SessionFold {
     byTool: new Map(Object.entries(fold.byTool ?? {})),
     bySite: new Map(Object.entries(fold.bySite)),
     unpricedModels: new Set(fold.unpricedModels),
+    rawModelsByProvider: new Map(Object.entries(fold.rawModelsByProvider ?? {}).map(([provider, models]) =>
+      [provider, new Set(models)])),
     planCalls: new Map(Object.entries(fold.planCalls)),
     planSiteCalls: new Map(Object.entries(fold.planSiteCalls ?? {})),
     turns: fold.turns,
@@ -1265,6 +1278,15 @@ function freshMachine(): FoldMachine {
   }
 }
 
+/** 取某 provider 通道的原始模型 id 集合（不存在则建空集）：折叠收集与合并共用。 */
+function rawModelsOf(fold: SessionFold, provider: string): Set<string> {
+  const bucket = fold.rawModelsByProvider.get(provider)
+  if (bucket !== undefined) return bucket
+  const fresh = new Set<string>()
+  fold.rawModelsByProvider.set(provider, fresh)
+  return fresh
+}
+
 /** 空白 fold 的统一构造：foldSession 与聚合器的分片/增量路径共用同一字段初值。 */
 function freshFold(): SessionFold {
   return {
@@ -1277,6 +1299,7 @@ function freshFold(): SessionFold {
     byTool: new Map(),
     bySite: new Map(),
     unpricedModels: new Set(),
+    rawModelsByProvider: new Map(),
     planCalls: new Map(),
     planSiteCalls: new Map(),
     turns: [],
@@ -1374,6 +1397,8 @@ function foldInto(
       // 历史路由别名归位：改名/删除的旧路由按别名映射到当前路由后再做一切判定。
       const provider = routeAliases[rawProvider] ?? rawProvider
       key = resolveCatalogKey(model)
+      // 原始模型 id 按 provider 通道留存（归一化前）：映射 Tab 的「全部渠道模型」行来源。
+      rawModelsOf(fold, provider).add(model)
       // 订阅套餐 provider 的调用即使撞名计费表也一律免费。
       subscription = isSubscriptionCall(subscriptionProviders, provider)
       // 官方直连（DeepSeek 官方）vs 第三方中转/代理；有 baseURL 的路由按 origin 判定，
@@ -1449,6 +1474,8 @@ function foldInto(
       // 权威归属同样先做路由别名归位，与 request/header 口径一致。
       const provider = routeAliases[source.provider] ?? source.provider
       key = resolveCatalogKey(source.model)
+      // 与 header 口径一致：原始 id 按 provider 通道留存（映射 Tab 行来源）。
+      rawModelsOf(fold, provider).add(source.model)
       subscription = isSubscriptionCall(subscriptionProviders, provider)
       // 订阅豁免命中的配置外通道归位 direct，与 header 口径一致（issue #37）。
       const siteRef = siteRefOf(provider, routes, { subscription })
@@ -2145,6 +2172,7 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
       const byTool = new Map<string, number>()
       const bySite = new Map<string, ModelUsage>()
       const unpricedModels = new Set<string>()
+      const rawModelsByProvider = new Map<string, Set<string>>()
       const planCalls = new Map<string, number>()
       const planSiteCalls = new Map<string, number>()
       const sessionRows: SessionUsageRow[] = []
@@ -2178,6 +2206,11 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
         for (const [tierKey, cell] of fold.byTier) mergeUsageInto(usageCell(byTier, tierKey), cell)
         for (const [toolName, count] of fold.byTool) byTool.set(toolName, (byTool.get(toolName) ?? 0) + count)
         for (const id of fold.unpricedModels) unpricedModels.add(id)
+        for (const [provider, models] of fold.rawModelsByProvider) {
+          const bucket = rawModelsByProvider.get(provider)
+          if (bucket === undefined) rawModelsByProvider.set(provider, new Set(models))
+          else for (const id of models) bucket.add(id)
+        }
         for (const [modelKey, count] of fold.planCalls) {
           planCalls.set(modelKey, (planCalls.get(modelKey) ?? 0) + count)
         }
@@ -2325,6 +2358,9 @@ export function createUsageAggregator(persistence: UsagePersistence, options: Ag
         ...(byTool.size === 0 ? {} : { byTool: Object.fromEntries([...byTool].sort((a, b) => b[1] - a[1])) }),
         ...(bySite.size === 0 ? {} : { bySite: toRecord(bySite) }),
         ...(unpricedModels.size === 0 ? {} : { unpricedModels: [...unpricedModels].sort() }),
+        ...(rawModelsByProvider.size === 0 ? {} : { rawModelsByProvider: Object.fromEntries(
+          [...rawModelsByProvider].map(([provider, models]) => [provider, [...models].sort()] as const).sort((a, b) => a[0].localeCompare(b[0])),
+        ) }),
         ...(searchEstimate > 0 ? { searchCallEstimateCny: searchEstimate } : {}),
         ...(perf === undefined ? {} : { perf }),
         ...(staleLedgerSessions > 0 ? { staleLedgerSessions } : {}),

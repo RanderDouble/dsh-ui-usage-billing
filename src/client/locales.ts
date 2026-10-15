@@ -47,6 +47,7 @@ export type UsageBillingKey =
   | 'models'
   | 'providerBilling'
   | 'channelUnknown'
+  | 'channelDirect'
   | 'directTag'
   | 'relayTag'
   | 'unknownTag'
@@ -370,6 +371,7 @@ export const zh: Record<UsageBillingKey, string> = {
   'models': '模型计费明细',
   'providerBilling': '提供商计费与订阅',
   'channelUnknown': '未知路由',
+  'channelDirect': '直连',
   'directTag': '直连',
   'relayTag': '中转',
   'unknownTag': '未知',
@@ -693,6 +695,7 @@ export const en: Record<UsageBillingKey, string> = {
   'models': 'Model billing',
   'providerBilling': 'Provider billing & subscriptions',
   'channelUnknown': 'Unknown routes',
+  'channelDirect': 'Direct',
   'directTag': 'Direct',
   'relayTag': 'Relay',
   'unknownTag': 'Unknown',

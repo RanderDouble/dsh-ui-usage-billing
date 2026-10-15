@@ -23,7 +23,7 @@ import type { TokenUsage } from '@deepseek-ai/dsh-llm'
 import {
   aggregateUsage, createUsageAggregator, configFingerprint, dayStamp, foldSession, foldUsage, emptyUsage, workspaceNameOf, hostTimeZone,
   siteBucketKey, siteOriginOf, siteRefOf, sumSiteBuckets, runLedgerMigrations, FOLD_VERSION, foldSearchCall, DEFAULT_SEARCH_CALL_ESTIMATE_CNY,
-  DEFAULT_SUBSCRIPTION_PROVIDERS,
+  DEFAULT_SUBSCRIPTION_PROVIDERS, serializeFold,
   type LedgerMigration, type UsageLedgerDocument, type UsageLedgerSession,
   AGGREGATE_TTL_MS, LEDGER_SAVE_INTERVAL_MS, SESSION_ROW_LIMIT, type UsagePersistence,
 } from '../src/aggregate.ts'
@@ -517,6 +517,42 @@ describe('message.source attribution (issue #14)', () => {
     ], new Set())
     expect(fold.byModel.get('flash')?.calls).toBe(1)
     expect(fold.byModel.get('flash')?.cost ?? 0).toBeGreaterThan(0)
+  })
+
+  it('collects raw model ids by provider from message.source (map-tab row source)', () => {
+    // 原始 id 归一化前按 provider 通道留存：映射 Tab 的「全部渠道模型」行来源。
+    const fold = foldSession([
+      sourced(1, 1_000, 'sn-deepseek-v4-1-flash', 'sensenova-raccoon'),
+      sourced(2, 1_001, 'sn-deepseek-v4-1-flash', 'sensenova-raccoon'),
+      sourced(3, 1_002, 'glm-5.3-flash', 'zai-coding-cn'),
+    ], new Set())
+    expect(fold.rawModelsByProvider.get('sensenova-raccoon')).toEqual(new Set(['sn-deepseek-v4-1-flash']))
+    expect(fold.rawModelsByProvider.get('zai-coding-cn')).toEqual(new Set(['glm-5.3-flash']))
+    // 归一化照常：原始 id 不进用量桶。
+    expect(fold.byModel.get('flash')?.calls).toBe(2)
+  })
+
+  it('collects raw model ids from sparse request/header events too', () => {
+    const fold = foldSession([
+      ev('request/header', 1, 1_000, { header: { config: { provider: 'buddy', model: 'deepseek-v4.1' } } }),
+      ev('assistant/message', 2, 1_001, { turn: 1, step: 1, usage: USAGE, message: { role: 'assistant', content: [] } }),
+    ], new Set())
+    expect(fold.rawModelsByProvider.get('buddy')).toEqual(new Set(['deepseek-v4.1']))
+  })
+
+  it('round-trips rawModelsByProvider through the ledger row into the aggregated doc', async () => {
+    const events: SessionEvent[] = [sourced(1, 1_000, 'sn-deepseek-v4-1-flash', 'sensenova-raccoon')]
+    const fold = foldSession(events, new Set())
+    const stats = await aggregateUsage(fakePersistence({}), {
+      ledger: fakeLedgerStore([{
+        id: 'cc',
+        foldVersion: FOLD_VERSION,
+        fingerprint: configFingerprint(new Set(DEFAULT_SUBSCRIPTION_PROVIDERS), undefined, {}, DEFAULT_SEARCH_CALL_ESTIMATE_CNY, {}, new Set()),
+        fold: serializeFold(fold),
+      }]).store,
+    })
+    // 账本行恢复（Set）→ 聚合合并 → 文档输出（排序数组）：全链路不丢渠道分组。
+    expect(stats.rawModelsByProvider).toEqual({ 'sensenova-raccoon': ['sn-deepseek-v4-1-flash'] })
   })
 })
 

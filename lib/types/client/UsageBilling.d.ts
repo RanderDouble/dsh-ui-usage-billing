@@ -313,6 +313,8 @@ export interface UsageStats {
     }>;
     /** 不可计价模型 id（未收录/无价，费用按 0 计）；旧快照可能缺失。 */
     unpricedModels?: readonly string[];
+    /** 真实流量的原始模型 id（按 provider 通道分组）；映射 Tab 行来源，旧快照可能缺失。 */
+    rawModelsByProvider?: Record<string, readonly string[]>;
     /** 联网搜索请求的单次费用估算（人民币元，配置回显）；0 或缺省 = 未启用估算。 */
     searchCallEstimateCny?: number;
     /** 按角色费用归因（估算口径：输出实测，输入按消息长度摊分）；旧快照可能缺失。 */
