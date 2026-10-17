@@ -574,6 +574,40 @@ describe('UsageBilling actual-spend KPI card', () => {
       expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('$0.44')
     })
   })
+
+  it('accepts rows without the day split from a host that has not restarted', async () => {
+    // 宿主未重启时下发的行只有 today/month/total：累计口径仍可用，不抛错。
+    const legacy = {
+      providers: [{
+        provider: 'deepseek',
+        displayName: 'DeepSeek',
+        currency: 'CNY',
+        today: 3,
+        month: 3,
+        total: 30,
+        lastSampleAt: Date.now(),
+      }],
+    }
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : url.includes('/api/billing/actual')
+          ? legacy
+          : REAL_STATS
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥30.0')
+    })
+    // 没有按日拆分时今日档为空：显示零值，不显示累计值。
+    fireEvent.click(screen.getByTestId('billing-kpi-range-today'))
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥0')
+    })
+  })
 })
 
 /** 距今若干天的本地日期戳（与组件 localDayStamp 同规则）。 */

@@ -1228,6 +1228,8 @@ export async function fetchReconcile(): Promise<ReconcileNotice | undefined> {
 
 /**
  * 拉取实际消耗（各来源余额采样差值账本）；失败返回空列表，由调用方降级。
+ * 宿主进程与浏览器产物各自更新：宿主未重启时下发的行没有按日拆分，按空拆分
+ * 接收（累计口径仍正确），重启后自然补齐。
  * @returns the per-provider actual spend rows, or an empty list on any failure.
  */
 async function fetchActualSpend(): Promise<readonly ActualSpendRow[]> {
@@ -1235,7 +1237,8 @@ async function fetchActualSpend(): Promise<readonly ActualSpendRow[]> {
     const response = await fetch(ACTUAL_PATH)
     if (!response.ok) return []
     const parsed = JSON.parse(await response.text()) as Partial<ActualResponse>
-    return Array.isArray(parsed.providers) ? parsed.providers : []
+    if (!Array.isArray(parsed.providers)) return []
+    return parsed.providers.map(row => ({ ...row, byDay: row.byDay ?? {} }))
   } catch {
     return []
   }
