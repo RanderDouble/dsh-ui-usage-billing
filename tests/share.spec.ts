@@ -206,19 +206,34 @@ describe('dayInRange', () => {
 })
 
 describe('actualRangeRows', () => {
-  const row = (provider: string, currency: string, byDay: Record<string, number>, total: number) => ({
-    provider, displayName: provider, currency, byDay, total, today: 0, month: 0, lastSampleAt: 0,
+  const row = (
+    provider: string,
+    currency: string,
+    byDay: Record<string, number>,
+    sum: { today?: number; month?: number; total: number },
+  ) => ({
+    provider,
+    displayName: provider,
+    currency,
+    byDay,
+    today: sum.today ?? 0,
+    month: sum.month ?? 0,
+    total: sum.total,
+    lastSampleAt: 0,
   })
 
-  it('sums the day buckets inside the selected range and leaves accrued alone', () => {
-    const rows = [row('deepseek', 'CNY', { '2026-09-09': 3, '2026-09-01': 4, '2026-08-01': 5 }, 12)]
+  it('reads the day/month/accrued buckets and sums the rest from the day split', () => {
+    // 2026-09-09 是周三：近 7 天 = 09-03 起，本周 = 09-07 起。
+    const rows = [row('deepseek', 'CNY', { '2026-09-09': 3, '2026-09-08': 4, '2026-08-01': 5 }, { today: 3, month: 7, total: 12 })]
     expect(actualRangeRows(rows, '2026-09-09', 'today', 7)[0]?.cny).toBe(3)
     expect(actualRangeRows(rows, '2026-09-09', 'month', 7)[0]?.cny).toBe(7)
     expect(actualRangeRows(rows, '2026-09-09', 'all', 7)[0]?.cny).toBe(12)
+    expect(actualRangeRows(rows, '2026-09-09', '7d', 7)[0]?.cny).toBe(7)
+    expect(actualRangeRows(rows, '2026-09-09', 'week', 7)[0]?.cny).toBe(7)
   })
 
   it('normalizes USD rows into CNY before summing', () => {
-    const rows = [row('overseas', 'USD', { '2026-09-09': 2 }, 2)]
+    const rows = [row('overseas', 'USD', { '2026-09-09': 2 }, { today: 2, month: 2, total: 2 })]
     // 2 USD × 7 = 14 元；与 CNY 行同一单位后可相加。
     expect(actualRangeRows(rows, '2026-09-09', 'today', 7)[0]?.cny).toBe(14)
     expect(actualCnyOf(2, 'CNY', 7)).toBe(2)

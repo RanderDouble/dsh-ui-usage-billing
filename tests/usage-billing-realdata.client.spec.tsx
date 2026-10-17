@@ -576,7 +576,8 @@ describe('UsageBilling actual-spend KPI card', () => {
   })
 
   it('accepts rows without the day split from a host that has not restarted', async () => {
-    // 宿主未重启时下发的行只有 today/month/total：累计口径仍可用，不抛错。
+    // 宿主未重启时下发的行只有 today/month/total：这三档直接取行内汇总，
+    // 近 7 天与本周缺按日拆分，按零处理，不抛错。
     const legacy = {
       providers: [{
         provider: 'deepseek',
@@ -602,8 +603,13 @@ describe('UsageBilling actual-spend KPI card', () => {
     await waitFor(() => {
       expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥30.0')
     })
-    // 没有按日拆分时今日档为空：显示零值，不显示累计值。
+    // 今日档取行内的 today，同样不依赖按日拆分。
     fireEvent.click(screen.getByTestId('billing-kpi-range-today'))
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥3.00')
+    })
+    // 近 7 天没有可用的按日拆分：退回零值，不抛错也不显示累计值。
+    fireEvent.click(screen.getByTestId('billing-kpi-range-7d'))
     await waitFor(() => {
       expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥0')
     })

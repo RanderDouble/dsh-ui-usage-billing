@@ -204,8 +204,9 @@ export interface ActualRangeRow {
     lastSampleAt: number;
 }
 /**
- * 按统计范围汇总实际消耗行：累计范围取账本累计，其余范围用按日拆分求和。
- * 返回值已归一到人民币，调用方再按显示币种换算。
+ * 按统计范围汇总实际消耗行：今日/本月/累计取账本自带的同口径汇总，
+ * 近 7 天与本周用按日拆分求和（账本本身没有这两档）。返回值已归一到人民币，
+ * 调用方再按显示币种换算。
  * @param rows - `/api/billing/actual` 下发的行。
  * @param today - 本地今日日期戳。
  * @param range - 统计范围（含累计）。
