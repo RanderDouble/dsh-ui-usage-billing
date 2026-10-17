@@ -291,8 +291,10 @@ export const WEEKEND_OFFPEAK_START_MS = Date.parse('2026-08-22T16:00:00Z')
 export const FLASH_REPRICE_MS = Date.parse('2026-09-10T04:00:00Z')
 
 /**
- * flash 系调价前的官方谷档价（CNY / 1M tokens）：{@link FLASH_REPRICE_MS}
- * 之前的 flash / flash-vision-exp 事件按此回算（峰档 = 谷档 × 2）。
+ * V4 Flash（V4.1 接替前的型号）官方谷档价（CNY / 1M tokens）：峰档 = 谷档 × 2。
+ * 两种场景共用——{@link FLASH_REPRICE_MS} 之前的 flash / flash-vision-exp 事件
+ * 按此回算历史价；第三方自部署的真 V4 流量长期按此计价（见
+ * {@link isRealV4FlashId} 与 {@link computeCostAt}）。
  * 用户价 = 实付价，与 legacy 口径相同地跳过本表。
  */
 const FLASH_PRE_REPRICE_BAND: PriceBand = { input: 1.5, cacheHit: 0.05, output: 4.5 }
@@ -689,6 +691,22 @@ const UNSEEDED_OTHER: ModelEntry = {
  */
 export function canonModelId(id: string): string {
   return String(id).toLowerCase().replace(/\([^)]*\)/g, '').replace(/[^a-z0-9]+/g, '')
+}
+
+/**
+ * 原始模型 id 是否指向「真 V4 Flash」——V4 Flash / V4 Flash Vision (Exp) 这两条
+ * 被 V4.1 Flash 接替的型号，不含 V4.1（`deepseek-v4.1-flash`、新规范名
+ * `deepseek-flash`）与 V4 Pro。供应商自部署的真 V4 只在第三方通道出现；官方通道
+ * 上同名 id 的请求一律由 V4.1 Flash 服务并按 V4.1 价计（官方公告口径）。
+ * 归一后判定，`sn-` / `deepseek-ai/` 等前缀形态与尾部日期、`-free` 后缀一并命中。
+ * @param id - 日志里的原始模型 id（`message.source.model` / `request/header` 的 model）。
+ * @returns 该 id 是否属于真 V4 Flash 系列。
+ */
+export function isRealV4FlashId(id: string): boolean {
+  const canon = canonModelId(id)
+  if (!canon.includes('v4flash')) return false
+  // V4.1 归一后是 `...v41flash`：含 `v41` 的一律不算真 V4。
+  return !canon.includes('v41')
 }
 
 /**
@@ -1104,6 +1122,9 @@ function tariffV1At(timeMs: number): PriceTierId {
  * @param buckets - token usage counts.
  * @param timeMs - the call's wall-clock time (epoch ms); null falls back to the peak-share mix.
  * @param peakShare - fallback mix used only when `timeMs` is missing.
+ * @param realV4 - 本次调用是否为第三方通道上的真 V4 Flash（原始模型 id 属
+ *   {@link isRealV4FlashId} 且通道非官方）。第三方自部署的 V4 不受官方
+ *   2026-09-10 调价影响，长期按 V4 谷档价计；官方通道与 V4.1 流量保持现行价。
  * @returns the estimated cost in CNY（USD 计价模型已按当前汇率折算）。
  */
 export function computeCostAt(
@@ -1111,6 +1132,7 @@ export function computeCostAt(
   buckets: TokenUsageBuckets,
   timeMs: number | null | undefined,
   peakShare = DEFAULT_PEAK_SHARE,
+  realV4 = false,
 ): number {
   if (timeMs === null || timeMs === undefined || !Number.isFinite(timeMs)) return computeCost(entry, buckets, peakShare)
   // 促销与峰谷档同口径：按事件时刻判定该笔流量当时享受的单价。
@@ -1122,7 +1144,8 @@ export function computeCostAt(
   if (legacy !== undefined) return priceBandCost(legacy, buckets, 'CNY')
   // flash 系 2026-09-10 12:00 调价分界：分界前的事件按官方旧谷档价回算
   // （峰档 = 谷档 × 2，档位判定沿用当时的分段规则）；用户价跳过本表。
-  const repriced = timeMs < FLASH_REPRICE_MS && entry.userPriced !== true
+  // 第三方通道上的真 V4 不适用官方调价，分界之后同样按旧谷档价计。
+  const repriced = (timeMs < FLASH_REPRICE_MS || realV4) && entry.userPriced !== true
     ? FLASH_REPRICED_OFFPEAK[entry.key]
     : undefined
   if (repriced !== undefined) {

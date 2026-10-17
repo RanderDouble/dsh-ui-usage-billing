@@ -165,6 +165,8 @@ cost (CNY) = (missInput × p_input + cacheHit × p_cacheHit + output × p_output
 
 `input` in the stats is total input (cacheHit + cacheMiss); estimation splits it into hit / miss to avoid double counting. Models with two-band billing are mixed by `DEFAULT_PEAK_SHARE` (default 0.5); weekends (Beijing Sat/Sun) are charged at the off-peak rate all day.
 
+**Real V4 Flash on third-party channels is priced as V4**: on 2026-09-10 the official API started redirecting flash requests to V4.1 and billing them at V4.1 rates, while vendor-hosted deployments of the same `deepseek-v4-flash` id are unaffected and stay on the V4 off-peak band (cache hit ¥0.05, miss ¥1.5, output ¥4.5 per 1M; peak ×2). The judgement uses the raw model id (canonicalised, contains `v4flash` and not `v41`) plus whether the channel is the official direct route: official-channel calls keep the current V4.1 rate, V4.1 model ids are priced at the current rate on any channel, and a user price overrides both.
+
 ### Supported models (2026-08-21 lineup, OpenAI-compatible)
 
 | Provider  | Models                                                                                       |

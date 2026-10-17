@@ -379,6 +379,16 @@ export declare function modelKeyAliases(): Readonly<Record<string, string>>;
  * @returns 归一化键（字母数字小写串）。
  */
 export declare function canonModelId(id: string): string;
+/**
+ * 原始模型 id 是否指向「真 V4 Flash」——V4 Flash / V4 Flash Vision (Exp) 这两条
+ * 被 V4.1 Flash 接替的型号，不含 V4.1（`deepseek-v4.1-flash`、新规范名
+ * `deepseek-flash`）与 V4 Pro。供应商自部署的真 V4 只在第三方通道出现；官方通道
+ * 上同名 id 的请求一律由 V4.1 Flash 服务并按 V4.1 价计（官方公告口径）。
+ * 归一后判定，`sn-` / `deepseek-ai/` 等前缀形态与尾部日期、`-free` 后缀一并命中。
+ * @param id - 日志里的原始模型 id（`message.source.model` / `request/header` 的 model）。
+ * @returns 该 id 是否属于真 V4 Flash 系列。
+ */
+export declare function isRealV4FlashId(id: string): boolean;
 export declare function resolveCatalogKey(id: string): string;
 /** Lookup a model by its stats key; falls back to the generic `other` entry. */
 export declare function modelOf(key: string): ModelEntry;
@@ -449,9 +459,12 @@ export declare function computeCost(entry: ModelEntry, buckets: TokenUsageBucket
  * @param buckets - token usage counts.
  * @param timeMs - the call's wall-clock time (epoch ms); null falls back to the peak-share mix.
  * @param peakShare - fallback mix used only when `timeMs` is missing.
+ * @param realV4 - 本次调用是否为第三方通道上的真 V4 Flash（原始模型 id 属
+ *   {@link isRealV4FlashId} 且通道非官方）。第三方自部署的 V4 不受官方
+ *   2026-09-10 调价影响，长期按 V4 谷档价计；官方通道与 V4.1 流量保持现行价。
  * @returns the estimated cost in CNY（USD 计价模型已按当前汇率折算）。
  */
-export declare function computeCostAt(entry: ModelEntry, buckets: TokenUsageBuckets, timeMs: number | null | undefined, peakShare?: number): number;
+export declare function computeCostAt(entry: ModelEntry, buckets: TokenUsageBuckets, timeMs: number | null | undefined, peakShare?: number, realV4?: boolean): number;
 /** 人民币 → 美元（显示换算用）：用当前生效汇率（实时优先，缺失回退内置），
  *  与计价链路的 `currentRate()` 同口径，避免实时汇率生效时 USD 显示与计价不一致。 */
 export declare function cnyToUsd(cny: number): number;

@@ -870,6 +870,44 @@ describe('relay site attribution (P0-2)', () => {
     expect(fold.total.cost).toBe(fold.bySite.get('direct:deepseek-official')?.cost ?? -1)
     expect(fold.bySite.get('unknown')?.cost ?? 0).toBe(0)
   })
+
+  it('prices real V4 Flash on a relay channel at the V4 band (m04831)', () => {
+    const ev = (type: string, seq: number, time: number, data: Record<string, unknown>): SessionEvent =>
+      ({ type, seq, time, data }) as unknown as SessionEvent
+    // 2026-09-11 北京谷档：官方 flash 已按 V4.1 谷档（1/0.02/4），中转站真 V4 按 V4 谷档（1.5/0.05/4.5）。
+    const time = Date.UTC(2026, 8, 11, 5, 0, 0)
+    const relay = foldSession([
+      ev('request/header', 1, time, { header: { config: { provider: 'relay-a', model: 'deepseek-v4-flash' } } }),
+      ev('assistant/message', 2, time + 1, { turn: 1, step: 1, usage: USAGE }),
+    ], new Set(), undefined, { 'relay-a': { baseURL: 'https://relay.example.com/v1' } })
+    const official = foldSession([
+      ev('request/header', 1, time, { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } } }),
+      ev('assistant/message', 2, time + 1, { turn: 1, step: 1, usage: USAGE }),
+    ], new Set())
+    const relayCost = relay.bySite.get('site:https://relay.example.com')?.cost ?? -1
+    const officialCost = official.bySite.get('direct:deepseek-official')?.cost ?? -1
+    // USAGE 折算：缓存命中 800、未命中 120（输入 100 + 缓存写 20）、输出 50（每 1M）。
+    // 官方 V4.1 谷档 = 800×0.02 + 120×1 + 50×4 = ¥336；第三方真 V4 谷档 = 800×0.05 + 120×1.5 + 50×4.5 = ¥445。
+    expect(officialCost).toBeCloseTo(336 / 1_000_000, 12)
+    expect(relayCost).toBeCloseTo(445 / 1_000_000, 12)
+  })
+
+  it('keeps V4.1 Flash on a relay channel at the official rate (m04831)', () => {
+    const ev = (type: string, seq: number, time: number, data: Record<string, unknown>): SessionEvent =>
+      ({ type, seq, time, data }) as unknown as SessionEvent
+    const time = Date.UTC(2026, 8, 11, 5, 0, 0)
+    const routes = { 'relay-a': { baseURL: 'https://relay.example.com/v1' } }
+    const relay = foldSession([
+      ev('request/header', 1, time, { header: { config: { provider: 'relay-a', model: 'deepseek-v4.1-flash' } } }),
+      ev('assistant/message', 2, time + 1, { turn: 1, step: 1, usage: USAGE }),
+    ], new Set(), undefined, routes)
+    const official = foldSession([
+      ev('request/header', 1, time, { header: { config: { provider: 'deepseek-official', model: 'deepseek-v4.1-flash' } } }),
+      ev('assistant/message', 2, time + 1, { turn: 1, step: 1, usage: USAGE }),
+    ], new Set())
+    expect(relay.bySite.get('site:https://relay.example.com')?.cost ?? -1)
+      .toBeCloseTo(official.bySite.get('direct:deepseek-official')?.cost ?? -2, 10)
+  })
 })
 
 describe('aggregateUsage', () => {

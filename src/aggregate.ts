@@ -15,7 +15,7 @@ import { stat } from 'node:fs/promises'
 import * as sessionTypes from '@deepseek-ai/dsh-session/types'
 import type { SessionEvent, SessionHeader, SessionId, SessionLogOffset as SessionLogOffsetT } from '@deepseek-ai/dsh-session/types'
 import type { TokenUsage } from '@deepseek-ai/dsh-llm'
-import { isPriced, resolveCatalogKey, computeCostAt, modelOf, tierAt } from './client/pricing.ts'
+import { DEFAULT_PEAK_SHARE, isPriced, isRealV4FlashId, resolveCatalogKey, computeCostAt, modelOf, tierAt } from './client/pricing.ts'
 import { BUILTIN_MODEL_KEY_ALIASES } from './builtin-catalog.ts'
 import { isSubscriptionProviderId } from './subscriptions.ts'
 
@@ -307,8 +307,10 @@ export function emptyUsage(): ModelUsage {
  *   调用方保证其已按 `!subscription && isPriced(key)` 判定。
  * @param unverifiedChannel - 本次调用是否来自未知通道（配置外 provider）。未知通道的
  *   支出主体无法核实，费用一律记 0（token 照常统计，issue #82）。
+ * @param realV4 - 本次调用是否为第三方通道上的真 V4 Flash（原始 id 属
+ *   {@link isRealV4FlashId} 且通道非官方）：按 V4 谷档价计，不随官方 V4.1 调价。
  */
-export function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official = false, pricedCost?: number, unverifiedChannel = false): void {
+export function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official = false, pricedCost?: number, unverifiedChannel = false, realV4 = false): void {
   const cacheHit = usage.cacheReadTokens ?? 0
   const cacheMiss = usage.inputTokens + (usage.cacheWriteTokens ?? 0)
   acc.calls += 1
@@ -335,7 +337,7 @@ export function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subsc
       cacheHit,
       cacheMiss,
       output: usage.outputTokens,
-    }, timeMs)
+    }, timeMs, DEFAULT_PEAK_SHARE, realV4)
     acc.cost += thisCost
     if (official) acc.officialCost += thisCost
   }
@@ -989,7 +991,11 @@ export interface UsageLedgerDocument {
 // commandcode）不再依赖白名单，合成直连路由视图按官方目录价计价（issue #91）；
 // 同时模型别名（modelKeyAliases）进折叠指纹，别名改动后历史行按新目录键重算。
 // bump 让存量 unknown 行升级后重折补齐费用，仅日志已删的行留在旧口径。
-export const FOLD_VERSION = 23
+// 23：计价语义变更——第三方通道上的真 V4 Flash（原始 id 属真 V4 系列、通道非
+// 官方）按 V4 谷档价（1.5/0.05/4.5，峰 ×2）长期计，不再套官方 2026-09-10 的
+// V4.1 调价。旧口径把这类自部署 V4 按 V4.1 现价算，复用旧行会让升级后仍在按
+// 官方现价；bump 让日志仍在的会话按渠道口径重折，仅日志已删的行留在旧口径。
+export const FOLD_VERSION = 24
 
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
@@ -1258,6 +1264,8 @@ interface FoldMachine {
   subscription: boolean
   official: boolean
   siteBucket: string
+  /** 当前归属模型是否为第三方通道上的真 V4 Flash（原始 id 判定，见 {@link isRealV4FlashId}）。 */
+  realV4: boolean
   turns: Map<number, TurnState>
   steps: Map<string, StepPerf>
   lastOpenStepKey: string | undefined
@@ -1271,6 +1279,7 @@ function freshMachine(): FoldMachine {
     subscription: false,
     official: false,
     siteBucket: 'unknown',
+    realV4: false,
     turns: new Map(),
     steps: new Map(),
     lastOpenStepKey: undefined,
@@ -1342,6 +1351,7 @@ function foldInto(
   let subscription = machine.subscription
   let official = machine.official
   let siteBucket = machine.siteBucket
+  let realV4 = machine.realV4
   const turns = machine.turns
   const steps = machine.steps
   let lastOpenStepKey = machine.lastOpenStepKey
@@ -1407,6 +1417,9 @@ function foldInto(
       official = officialChannelOf(provider, siteRef, officialProviderIds)
       // 中转站归组：按当前路由映射到站点/直连/未知路由。
       siteBucket = siteBucketKey(siteRef)
+      // 第三方通道上的真 V4 Flash：官方把同名 id 的请求重定向到 V4.1 并按 V4.1
+      // 价计，供应商自部署的 V4 不受调价影响，按 V4 谷档价计。
+      realV4 = !official && isRealV4FlashId(model)
       // request/header 是该 step 的 TTFT 起点；归属到最近打开的 step（无独立请求头的
       // 工具续写步骤保持 undefined，以 step/start 起算估算）。
       if (lastOpenStepKey !== undefined) {
@@ -1481,6 +1494,7 @@ function foldInto(
       const siteRef = siteRefOf(provider, routes, { subscription })
       official = officialChannelOf(provider, siteRef, officialProviderIds)
       siteBucket = siteBucketKey(siteRef)
+      realV4 = !official && isRealV4FlashId(source.model)
     }
     // 归属到本条 message 的权威模型，token 按缓存分桶累加。
     // 时段按本次调用的实际时刻（event.time）精确判定，不再按固定比例混合。
@@ -1501,16 +1515,16 @@ function foldInto(
       cacheHit: usage.cacheReadTokens ?? 0,
       cacheMiss: usage.inputTokens + (usage.cacheWriteTokens ?? 0),
       output: usage.outputTokens,
-    }, event.time)
-    foldUsage(fold.total, usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
-    foldUsage(usageCell(fold.byModel, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
-    foldUsage(usageCell(fold.byDay, day), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
-    foldUsage(modelDayCell(fold.byDayModels, day, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    }, event.time, DEFAULT_PEAK_SHARE, realV4)
+    foldUsage(fold.total, usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
+    foldUsage(usageCell(fold.byModel, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
+    foldUsage(usageCell(fold.byDay, day), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
+    foldUsage(modelDayCell(fold.byDayModels, day, modelKey), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
     // 模型×日期×站点三维（issue #16）：供「按 origin 绑定自定义价」的显示层重估。
-    foldUsage(modelDaySiteCell(fold.byDayModelsSite, day, modelKey, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
-    foldUsage(usageCell(fold.bySite, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    foldUsage(modelDaySiteCell(fold.byDayModelsSite, day, modelKey, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
+    foldUsage(usageCell(fold.bySite, siteBucket), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
     // 峰谷分桶：与计费同口径逐调用判档（tierAt），峰谷占比因此是真实数据。
-    foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel)
+    foldUsage(usageCell(fold.byTier, tierAt(event.time)), usage, modelKey, subscription, event.time, official, thisCost, unverifiedChannel, realV4)
     if (subscription) fold.planCalls.set(modelKey, (fold.planCalls.get(modelKey) ?? 0) + 1)
     // 三维格同款计数：provider 视图的行 plan 按本格判定，键与 byDayModelsSite 对齐。
     if (subscription) {
@@ -1529,7 +1543,7 @@ function foldInto(
       state.cost += thisCost
       // 角色归因：输出成本实测计价；输入成本 = 整次成本 - 输出部分，合并时
       // 再按 user/tool 消息字符占比摊分。
-      const outputCost = computeCostAt(entry, { input: 0, cacheHit: 0, cacheMiss: 0, output: usage.outputTokens }, event.time)
+      const outputCost = computeCostAt(entry, { input: 0, cacheHit: 0, cacheMiss: 0, output: usage.outputTokens }, event.time, DEFAULT_PEAK_SHARE, realV4)
       fold.roles.outputCost += outputCost
       fold.roles.inputCost += thisCost - outputCost
     }
@@ -1551,6 +1565,7 @@ function foldInto(
   machine.subscription = subscription
   machine.official = official
   machine.siteBucket = siteBucket
+  machine.realV4 = realV4
   machine.lastOpenStepKey = lastOpenStepKey
 }
 

@@ -9,7 +9,7 @@ import {
   applyBuiltinCatalog, applyLiveCatalogModels, applyLivePricing, applyPromo, canonModelId, catalogEntries, cnyToUsd, computeCost,
   computeCostAt, convertUnitPrice, formatMoney, formatPercent, formatTokens, formatUnitPrice,
   applyUserModelAliases,
-  getRateInfo, isPeakHour, isPromoActive, modelOf, resolveCatalogKey, tierAt, tierCountdown,
+  getRateInfo, isPeakHour, isPromoActive, isRealV4FlashId, modelOf, resolveCatalogKey, tierAt, tierCountdown,
 } from '../src/client/pricing.ts'
 import { BUILTIN_MODEL_CATALOG, BUILTIN_MODEL_KEY_ALIASES } from '../src/builtin-catalog.ts'
 import { PROVIDER_ALIASES } from '../src/client/UsageBilling.tsx'
@@ -473,6 +473,41 @@ describe('computeCostAt (P0-1)', () => {
 
   it('prices flat models identically at any time', () => {
     expect(computeCostAt(modelOf('glm'), buckets, preAt(10))).toBeCloseTo(computeCostAt(modelOf('glm'), buckets, postAt(13)), 10)
+  })
+})
+
+describe('real V4 Flash on third-party channels', () => {
+  const MILLION = 1_000_000
+  const buckets = { input: 2 * MILLION, cacheHit: MILLION, cacheMiss: MILLION, output: MILLION }
+  const postAt = (beijingHour: number): number => Date.UTC(2026, 8, 11, (beijingHour + 24 - 8) % 24)
+
+  it('identifies real V4 Flash ids and rejects V4.1 and other models', () => {
+    expect(isRealV4FlashId('deepseek-v4-flash')).toBe(true)
+    expect(isRealV4FlashId('deepseek/deepseek-v4-flash')).toBe(true)
+    expect(isRealV4FlashId('DeepSeek-V4-Flash')).toBe(true)
+    expect(isRealV4FlashId('deepseek-v4.1-flash')).toBe(false)
+    expect(isRealV4FlashId('deepseek-v41-flash')).toBe(false)
+    expect(isRealV4FlashId('deepseek-v4-pro')).toBe(false)
+    expect(isRealV4FlashId('deepseek-v3.2')).toBe(false)
+  })
+
+  it('prices third-party real V4 Flash at the V4 band after the reprice boundary', () => {
+    // 官方通道在 09-10 之后按 V4.1 谷档 1/0.02/4 计；第三方自部署 V4 仍按 V4 谷档。
+    const official = computeCostAt(modelOf('flash'), buckets, postAt(13))
+    expect(official).toBeCloseTo((MILLION * 0.02 + MILLION * 1 + MILLION * 4) / MILLION, 10)
+    expect(computeCostAt(modelOf('flash'), buckets, postAt(13), 0.5, true))
+      .toBeCloseTo((MILLION * 0.05 + MILLION * 1.5 + MILLION * 4.5) / MILLION, 10)
+  })
+
+  it('doubles the V4 band at peak for third-party real V4 Flash', () => {
+    expect(computeCostAt(modelOf('flash'), buckets, postAt(10), 0.5, true))
+      .toBeCloseTo((MILLION * 0.1 + MILLION * 3 + MILLION * 9) / MILLION, 10)
+  })
+
+  it('keeps user prices authoritative for third-party real V4 Flash', () => {
+    const priced = { ...modelOf('flash'), userPriced: true as const, price: { currency: 'CNY' as const, input: 9, cacheHit: 0.3, output: 27 } }
+    expect(computeCostAt(priced, buckets, postAt(13), 0.5, true))
+      .toBeCloseTo((MILLION * 0.3 + MILLION * 9 + MILLION * 27) / MILLION, 10)
   })
 })
 

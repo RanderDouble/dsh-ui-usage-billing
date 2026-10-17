@@ -211,8 +211,10 @@ export declare function emptyUsage(): ModelUsage;
  *   调用方保证其已按 `!subscription && isPriced(key)` 判定。
  * @param unverifiedChannel - 本次调用是否来自未知通道（配置外 provider）。未知通道的
  *   支出主体无法核实，费用一律记 0（token 照常统计，issue #82）。
+ * @param realV4 - 本次调用是否为第三方通道上的真 V4 Flash（原始 id 属
+ *   {@link isRealV4FlashId} 且通道非官方）：按 V4 谷档价计，不随官方 V4.1 调价。
  */
-export declare function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official?: boolean, pricedCost?: number, unverifiedChannel?: boolean): void;
+export declare function foldUsage(acc: ModelUsage, usage: TokenUsage, key: string, subscription: boolean, timeMs: number, official?: boolean, pricedCost?: number, unverifiedChannel?: boolean, realV4?: boolean): void;
 /**
  * 联网搜索辅助请求的单次费用估算默认值（人民币元）。DeepSeek 官方对搜索请求
  * （web_search 服务端工具注入上下文）照常计费，实测每次约 0.01~0.03 元，取中值；
@@ -607,7 +609,7 @@ export interface UsageLedgerDocument {
  * 会话费用只剩最近一段，issue #29）。
  * 持久账本行据此区分新旧算法：日志已删/不可读而只能沿用旧行时，UI 标注置信度提示。
  */
-export declare const FOLD_VERSION = 23;
+export declare const FOLD_VERSION = 24;
 /**
  * 一次性账本迁移：id 唯一，apply 在加载边界对原始文档执行，已应用过的跳过。
  * 未来账本/schema 字段变更（重命名、拆桶、语义调整）时，在此追加一条迁移并
