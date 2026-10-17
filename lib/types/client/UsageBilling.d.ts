@@ -15,6 +15,7 @@ import { type ClientPerf } from './PerfPanel.tsx';
 import type { createBillingBudgetStore } from './budget-store.ts';
 import { type CatalogModel } from './pricing.ts';
 import type { ReconcileNotice } from '../pricing-shared.ts';
+import type { ActualSpendRow } from '../actual.ts';
 import { NS, type UsageBillingKey } from './locales.ts';
 /** Model-connectivity health reported by the host model directory probe. */
 export interface ModelHealth {
@@ -174,6 +175,44 @@ export interface KpiAgg {
  * 直接取 total（含搜索估值兜底），不走此函数。
  */
 export declare function sumByDayRange(byDay: Record<string, KpiDayRow>, today: string, range: Exclude<AvgCostRange, 'all'>): KpiAgg;
+/**
+ * 判断某个本地日期戳是否落在统计范围内：与 `sumByDayRange` 同一套日期窗口
+ * （今日 / 近 7 天含今天 / 本周周一起 / 本月），供实际消耗等非 byDay 数据源
+ * 复用同一口径。
+ * @param date - 本地日期戳 `YYYY-MM-DD`。
+ * @param today - 本地今日日期戳。
+ * @param range - 统计范围（不含累计；累计不做日期过滤）。
+ * @returns 是否在范围内。
+ */
+export declare function dayInRange(date: string, today: string, range: Exclude<AvgCostRange, 'all'>): boolean;
+/**
+ * 实际消耗记在来源原生币种上（CNY 或 USD）：USD 行按当前汇率折成人民币，
+ * 与理论消耗的存储口径一致，之后再统一换算到显示币种。
+ * @param amount - 原生币种金额。
+ * @param currency - 行原生币种。
+ * @param rate - 当前 USD→CNY 汇率。
+ * @returns 人民币金额。
+ */
+export declare function actualCnyOf(amount: number, currency: string, rate: number): number;
+/** 一个来源在所选统计范围内的实际消耗（人民币，已归一到与服务端一致的存储币种）。 */
+export interface ActualRangeRow {
+    provider: string;
+    displayName: string;
+    /** 范围内消耗（人民币）。 */
+    cny: number;
+    currency: string;
+    lastSampleAt: number;
+}
+/**
+ * 按统计范围汇总实际消耗行：累计范围取账本累计，其余范围用按日拆分求和。
+ * 返回值已归一到人民币，调用方再按显示币种换算。
+ * @param rows - `/api/billing/actual` 下发的行。
+ * @param today - 本地今日日期戳。
+ * @param range - 统计范围（含累计）。
+ * @param rate - USD→CNY 汇率。
+ * @returns 每个来源一行的范围内消耗。
+ */
+export declare function actualRangeRows(rows: readonly ActualSpendRow[], today: string, range: AvgCostRange, rate: number): readonly ActualRangeRow[];
 /** 会话明细行（与服务端 SessionUsageRow 同形；旧快照可能缺失整个 bySession）。 */
 interface SessionBillingRow {
     id: string;

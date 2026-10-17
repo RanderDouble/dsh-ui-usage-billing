@@ -622,15 +622,6 @@ export function sumByDayRange(
   today: string,
   range: Exclude<AvgCostRange, 'all'>,
 ): KpiAgg {
-  const now = new Date(`${today}T00:00:00`)
-  // 周一起算偏移（issue #39 口径）；近 7 天 = 今天往前 6 天。
-  const weekOffset = (now.getDay() + 6) % 7
-  const weekStart = new Date(now)
-  weekStart.setDate(weekStart.getDate() - weekOffset)
-  const weekStartStamp = localDayStamp(weekStart.getTime())
-  const days7Start = new Date(now)
-  days7Start.setDate(days7Start.getDate() - 6)
-  const range7Start = localDayStamp(days7Start.getTime())
   let cost = 0
   let calls = 0
   let input = 0
@@ -641,11 +632,7 @@ export function sumByDayRange(
   let peakDay: string | undefined
   let peakTokens = 0
   for (const [date, row] of Object.entries(byDay)) {
-    const inRange = range === 'today' ? date === today
-      : range === '7d' ? date >= range7Start && date <= today
-      : range === 'week' ? date >= weekStartStamp && date <= today
-      : date.startsWith(today.slice(0, 7))
-    if (!inRange) continue
+    if (!dayInRange(date, today, range)) continue
     cost += row.cost
     calls += row.calls
     input += row.input
@@ -661,6 +648,82 @@ export function sumByDayRange(
     }
   }
   return { cost, calls, input, output, cacheHit, cacheMiss, reasoning, peakDay, peakTokens }
+}
+
+/**
+ * 判断某个本地日期戳是否落在统计范围内：与 `sumByDayRange` 同一套日期窗口
+ * （今日 / 近 7 天含今天 / 本周周一起 / 本月），供实际消耗等非 byDay 数据源
+ * 复用同一口径。
+ * @param date - 本地日期戳 `YYYY-MM-DD`。
+ * @param today - 本地今日日期戳。
+ * @param range - 统计范围（不含累计；累计不做日期过滤）。
+ * @returns 是否在范围内。
+ */
+export function dayInRange(date: string, today: string, range: Exclude<AvgCostRange, 'all'>): boolean {
+  const now = new Date(`${today}T00:00:00`)
+  // 周一起算偏移（issue #39 口径）；近 7 天 = 今天往前 6 天。
+  const weekOffset = (now.getDay() + 6) % 7
+  const weekStart = new Date(now)
+  weekStart.setDate(weekStart.getDate() - weekOffset)
+  const weekStartStamp = localDayStamp(weekStart.getTime())
+  const days7Start = new Date(now)
+  days7Start.setDate(days7Start.getDate() - 6)
+  const range7Start = localDayStamp(days7Start.getTime())
+  return range === 'today' ? date === today
+    : range === '7d' ? date >= range7Start && date <= today
+    : range === 'week' ? date >= weekStartStamp && date <= today
+    : date.startsWith(today.slice(0, 7))
+}
+
+/**
+ * 实际消耗记在来源原生币种上（CNY 或 USD）：USD 行按当前汇率折成人民币，
+ * 与理论消耗的存储口径一致，之后再统一换算到显示币种。
+ * @param amount - 原生币种金额。
+ * @param currency - 行原生币种。
+ * @param rate - 当前 USD→CNY 汇率。
+ * @returns 人民币金额。
+ */
+export function actualCnyOf(amount: number, currency: string, rate: number): number {
+  return currency === 'USD' ? amount * rate : amount
+}
+
+/** 一个来源在所选统计范围内的实际消耗（人民币，已归一到与服务端一致的存储币种）。 */
+export interface ActualRangeRow {
+  provider: string
+  displayName: string
+  /** 范围内消耗（人民币）。 */
+  cny: number
+  currency: string
+  lastSampleAt: number
+}
+
+/**
+ * 按统计范围汇总实际消耗行：累计范围取账本累计，其余范围用按日拆分求和。
+ * 返回值已归一到人民币，调用方再按显示币种换算。
+ * @param rows - `/api/billing/actual` 下发的行。
+ * @param today - 本地今日日期戳。
+ * @param range - 统计范围（含累计）。
+ * @param rate - USD→CNY 汇率。
+ * @returns 每个来源一行的范围内消耗。
+ */
+export function actualRangeRows(
+  rows: readonly ActualSpendRow[],
+  today: string,
+  range: AvgCostRange,
+  rate: number,
+): readonly ActualRangeRow[] {
+  return rows.map(row => {
+    const raw = range === 'all'
+      ? row.total
+      : Object.entries(row.byDay).reduce((sum, [date, amount]) => dayInRange(date, today, range) ? sum + amount : sum, 0)
+    return {
+      provider: row.provider,
+      displayName: row.displayName,
+      cny: actualCnyOf(raw, row.currency, rate),
+      currency: row.currency,
+      lastSampleAt: row.lastSampleAt,
+    }
+  })
 }
 
 /** Resolve one provider's dot state: green when live, red when failed, gray when unknown. */
@@ -2967,13 +3030,13 @@ function BillingDashboard({
     return sumByDayRange(byDay, localDayStamp(), kpiRange)
   }, [kpiRange, displayTotal, total, byDay])
 
-  // 实际消耗 KPI 卡：主数字 = 各来源累计之和（按币种直接相加展示，明细行里保留
-  // 逐来源原币种金额）；无采样来源时主数字显示占位。
-  const actualSpendTotalFmt = useMemo(() => {
-    if (actualSpend.length === 0) return '—'
-    const parts = actualSpend.map(row => `${row.currency === 'USD' ? '$' : '¥'}${row.total.toFixed(2)}`)
-    return parts.length === 1 ? parts[0] : parts.join(' + ')
-  }, [actualSpend])
+  // 实际消耗 KPI 卡：跟随全局统计范围与显示币种，与其余七卡同一套窗口判定；
+  // 各来源原生币种先归一到人民币再加总，最后按显示币种格式化。
+  const actualRange = useMemo(
+    () => actualRangeRows(actualSpend, localDayStamp(), kpiRange, rateInfo.rate),
+    [actualSpend, kpiRange, rateInfo.rate],
+  )
+  const actualRangeTotal = actualRange.reduce((sum, row) => sum + row.cny, 0)
 
   // Trend-chart legend: model rows sort by cost desc, so the stack bottoms
   // with the most expensive model (visually stable baseline).
@@ -3310,16 +3373,16 @@ function BillingDashboard({
                   </div>
                   {/* 实际消耗（余额采样差值）：KPI 第 8 卡。理论消耗按 token×官网价，
                       实际消耗按账户余额下降量，两本账并列互不混合。
-                      明细行 = 各来源按币种折合后的今日/累计金额；无采样来源显示占位。 */}
+                      主数字与明细行跟随全局统计范围与显示币种；无采样来源显示占位。 */}
                   <div className={css.kpiTile} data-testid="billing-kpi-actual">
                     <span className={css.kpiLabel}>{t('actualSpend')}</span>
                     <span className={css.kpiValue}>
-                      {actualSpendTotalFmt}
+                      {actualRange.length > 0 ? money(actualRangeTotal) : '—'}
                     </span>
                     <span className={css.kpiDetail}>
-                      {actualSpend.length > 0
-                        ? actualSpend
-                            .map(row => `${row.currency === 'USD' ? '$' : '¥'}${row.today.toFixed(2)} / ${row.currency === 'USD' ? '$' : '¥'}${row.total.toFixed(2)}`)
+                      {actualRange.length > 0
+                        ? actualRange
+                            .map(row => `${row.displayName} ${money(row.cny)}`)
                             .join(' · ')
                         : t('actualSpendNone')}
                     </span>
@@ -4826,8 +4889,8 @@ export function UsageBilling(props: UsageBillingProps): React.ReactNode {
     .reduce((sum, [, day]) => sum + day.cost, 0)
   const todayCost = displayStats.byDay[today]?.cost ?? 0
   // 实际消耗（各来源余额采样差值）：随轮询与理论消耗同步刷新，透传触发卡与概览。
-  // 币种不做换算：折算币种（CNY 积分价）之外的原生余额行按账面值直接相加。
-  const actualToday = actualSpend.reduce((sum, row) => sum + row.today, 0)
+  // 各来源按原生币种记账，先归一到人民币再加总；触发卡的 money() 再换算显示币种。
+  const actualToday = actualSpend.reduce((sum, row) => sum + actualCnyOf(row.today, row.currency, getRateInfo().rate), 0)
   // 触发卡 hover 速览：本周累计 + 近 7 天迷你柱。
   // 「本周」按自然周（周一起算，与标签语义一致，issue #39）：周一时它 ≈ 当日，
   // 不再是「近 7 天」把上周用量卷进来、与当月几乎相等的错位。

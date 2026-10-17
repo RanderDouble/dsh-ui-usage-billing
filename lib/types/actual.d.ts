@@ -79,6 +79,8 @@ export interface ActualSpend {
     month: number;
     /** 全部保留采样的累计消耗。 */
     total: number;
+    /** 按本地日期（YYYY-MM-DD）拆分的消耗，供界面按统计范围聚合。 */
+    byDay: Record<string, number>;
     /** 最近一次成功采样的时刻；无采样为 0。 */
     lastSampleAt: number;
 }

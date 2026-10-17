@@ -78,7 +78,7 @@ describe('actualDeltaOf', () => {
 describe('actualSpendOf', () => {
   it('treats the first sample as baseline only (首采不记消耗)', () => {
     const spend = actualSpendOf(ledgerOf([sample()]), DAY, MONTH, 2_000)
-    expect(spend).toEqual({ today: 0, month: 0, total: 0, lastSampleAt: 1_000 })
+    expect(spend).toEqual({ today: 0, month: 0, total: 0, byDay: {}, lastSampleAt: 1_000 })
   })
 
   it('accumulates drops into day/month/total buckets by the later sample time', () => {
@@ -91,6 +91,9 @@ describe('actualSpendOf', () => {
     expect(spend.today).toBeCloseTo(10)
     expect(spend.month).toBeCloseTo(15)
     expect(spend.total).toBeCloseTo(15)
+    // 按日拆分：15 = 今日 10 + 次日 5，供界面按统计范围聚合。
+    expect(spend.byDay[DAY]).toBeCloseTo(10)
+    expect(spend.byDay['2026-08-17']).toBeCloseTo(5)
     expect(spend.lastSampleAt).toBe(dayStart('2026-08-17'))
   })
 
@@ -109,7 +112,7 @@ describe('actualSpendOf', () => {
   })
 
   it('returns an empty spend for an empty series', () => {
-    expect(actualSpendOf(ledgerOf([]), DAY, MONTH, 2_000)).toEqual({ today: 0, month: 0, total: 0, lastSampleAt: 0 })
+    expect(actualSpendOf(ledgerOf([]), DAY, MONTH, 2_000)).toEqual({ today: 0, month: 0, total: 0, byDay: {}, lastSampleAt: 0 })
   })
 })
 

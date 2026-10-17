@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { recostWithUserPrices, lastSevenDays, sinceMondayOf, type UsageStats } from '../src/client/UsageBilling.tsx'
+import { recostWithUserPrices, lastSevenDays, sinceMondayOf, dayInRange, actualCnyOf, actualRangeRows, type UsageStats } from '../src/client/UsageBilling.tsx'
 import { applyUserPrices, getUserPrices, normalizeOriginInput, originsMatch } from '../src/client/pricing.ts'
 
 /** 最小可用统计文档：day×model 一格 + 同日聚合 + 未计价模型提示列表。 */
@@ -188,5 +188,40 @@ describe('sinceMondayOf (issue #39)', () => {
       '2026-09-08': { input: 20, output: 2 },
     }
     expect(sinceMondayOf(byDay, '2026-09-08', (r) => r.input + r.output)).toBe(33)
+  })
+})
+
+describe('dayInRange', () => {
+  // 2026-09-09 是周三：本周 = 09-07 起，近 7 天 = 09-03 起。
+  it('matches the same date windows as the KPI range aggregation', () => {
+    expect(dayInRange('2026-09-09', '2026-09-09', 'today')).toBe(true)
+    expect(dayInRange('2026-09-08', '2026-09-09', 'today')).toBe(false)
+    expect(dayInRange('2026-09-03', '2026-09-09', '7d')).toBe(true)
+    expect(dayInRange('2026-09-02', '2026-09-09', '7d')).toBe(false)
+    expect(dayInRange('2026-09-07', '2026-09-09', 'week')).toBe(true)
+    expect(dayInRange('2026-09-06', '2026-09-09', 'week')).toBe(false)
+    expect(dayInRange('2026-09-01', '2026-09-09', 'month')).toBe(true)
+    expect(dayInRange('2026-08-31', '2026-09-09', 'month')).toBe(false)
+  })
+})
+
+describe('actualRangeRows', () => {
+  const row = (provider: string, currency: string, byDay: Record<string, number>, total: number) => ({
+    provider, displayName: provider, currency, byDay, total, today: 0, month: 0, lastSampleAt: 0,
+  })
+
+  it('sums the day buckets inside the selected range and leaves accrued alone', () => {
+    const rows = [row('deepseek', 'CNY', { '2026-09-09': 3, '2026-09-01': 4, '2026-08-01': 5 }, 12)]
+    expect(actualRangeRows(rows, '2026-09-09', 'today', 7)[0]?.cny).toBe(3)
+    expect(actualRangeRows(rows, '2026-09-09', 'month', 7)[0]?.cny).toBe(7)
+    expect(actualRangeRows(rows, '2026-09-09', 'all', 7)[0]?.cny).toBe(12)
+  })
+
+  it('normalizes USD rows into CNY before summing', () => {
+    const rows = [row('overseas', 'USD', { '2026-09-09': 2 }, 2)]
+    // 2 USD × 7 = 14 元；与 CNY 行同一单位后可相加。
+    expect(actualRangeRows(rows, '2026-09-09', 'today', 7)[0]?.cny).toBe(14)
+    expect(actualCnyOf(2, 'CNY', 7)).toBe(2)
+    expect(actualCnyOf(2, 'USD', 7)).toBe(14)
   })
 })

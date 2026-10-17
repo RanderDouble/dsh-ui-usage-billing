@@ -527,3 +527,59 @@ describe('UsageBilling budget-pressure trigger feedback', () => {
     expect(screen.getByTestId('billing-trigger-icon').className).not.toMatch(/triggerBudgetHot/)
   })
 })
+
+describe('UsageBilling actual-spend KPI card', () => {
+  /** 两档按日拆分：今日 3 元 + 40 天前 20 元；累计 total = 30 元。 */
+  const ACTUAL = {
+    providers: [{
+      provider: 'deepseek',
+      displayName: 'DeepSeek',
+      currency: 'CNY',
+      today: 3,
+      month: 3,
+      total: 30,
+      byDay: { [todayStamp()]: 3, [stampDaysAgo(40)]: 20 },
+      lastSampleAt: Date.now(),
+    }],
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      const body = url.includes('/api/billing/pricing')
+        ? { source: 'builtin' }
+        : url.includes('/api/billing/actual')
+          ? ACTUAL
+          : REAL_STATS
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    }))
+  })
+
+  it('follows the global range and the display currency', async () => {
+    const { container } = render(<UsageBilling {...makeProps()} />)
+    fireEvent.click(container.querySelector('button')!)
+    await screen.findByTestId('billing-kpi-actual')
+    // 默认「累计」：主数字取账本累计，不再逐来源拼原生币种。
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥30.0')
+    })
+    // 切到「今日」：只算今日桶（3 元）。
+    fireEvent.click(screen.getByTestId('billing-kpi-range-today'))
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('¥3.00')
+    })
+    // 切到 USD：同一笔金额按汇率换算符号与数值。
+    fireEvent.click(screen.getByTestId('billing-currency-usd'))
+    await waitFor(() => {
+      expect(screen.getByTestId('billing-kpi-actual').textContent).toContain('$0.44')
+    })
+  })
+})
+
+/** 距今若干天的本地日期戳（与组件 localDayStamp 同规则）。 */
+function stampDaysAgo(offset: number): string {
+  const date = new Date()
+  date.setDate(date.getDate() - offset)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
